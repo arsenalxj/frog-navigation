@@ -24,12 +24,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/build.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/verify-package.ps1
 ```
 
-产物为 `windows/dist/Frog-windows-x64.zip`，其中包含 `Frog.exe` 与安装／卸载脚本。Windows CI 在 `main`、`master` 的相关改动及手动触发时构建、执行测试并保存产物；macOS CI 执行 Swift 单元测试。
+产物为 `windows/dist/Frog-windows-x64.zip`，其中包含 `Frog.exe` 与安装／卸载脚本。两端构建与测试均通过上述本地命令执行。
 
 ## 目录
 
 - `macos/`、`windows/`：平台源码、资源、测试与构建工具。
 - `plans/`：桌面端功能方案；`designs/`：对应设计原型。
-- `.github/workflows/`：桌面端持续集成。
 
 应用菜单、窗口及安装入口使用“青蛙导航”。内部工程、模块和标识统一使用 Frog，新版使用独立数据目录及 frog-bookmarks 格式。导入备份时须符合当前 `frog-bookmarks` 格式。原网页及浏览器扩展继续在原仓库维护。
