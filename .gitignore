@@ -1,0 +1,10 @@
+.DS_Store
+macos/.build/
+macos/build/
+macos/.swiftpm/
+windows/build/
+windows/dist/
+*.xcuserstate
+xcuserdata/
+__pycache__/
+*.pyc

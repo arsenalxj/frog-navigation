@@ -1,0 +1,28 @@
+#include <windows.h>
+#pragma code_page(65001)
+101 ICON "AppIcon.ico"
+1 RT_MANIFEST "Frog.manifest"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "080404B0"
+  BEGIN
+   VALUE "CompanyName", "青蛙导航"
+   VALUE "FileDescription", "青蛙导航书签启动台"
+   VALUE "FileVersion", "1.0.0"
+   VALUE "ProductName", "青蛙导航"
+   VALUE "ProductVersion", "1.0.0"
+   VALUE "OriginalFilename", "Frog.exe"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x804, 1200
+ END
+END

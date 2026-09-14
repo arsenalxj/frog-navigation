@@ -1,0 +1,32 @@
+{
+  "fill" : {
+    "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "Frog.png",
+          "name" : "青蛙"
+        }
+      ],
+      "name" : "青蛙导航",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+
+    ],
+    "squares" : "shared"
+  }
+}

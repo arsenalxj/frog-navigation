@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "青蛙导航 Windows Launchpad": {
+      "versions": [
+        {
+          "path": "青蛙导航 Windows Launchpad.html",
+          "createdAt": "2026-09-14T06:53:06.947Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-09-14T06:53:06.947Z",
+  "updatedAt": "2026-09-14T06:53:06.947Z"
+}

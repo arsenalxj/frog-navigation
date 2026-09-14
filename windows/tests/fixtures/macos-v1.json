@@ -1,0 +1,13 @@
+{
+  "format": "frog-bookmarks",
+  "schemaVersion": 1,
+  "groups": [
+    {"id": "C8ED36D8-4428-4972-B4AB-0556A96F3629", "name": "开发工具", "order": 1},
+    {"id": "5891402E-58F4-4B54-BBB3-25D0A62990F5", "name": "空文件夹", "order": 3}
+  ],
+  "bookmarks": [
+    {"id": "17217137-157C-4CCF-9622-A1A2B04AB82D", "title": "中文书签 👨‍👩‍👧", "url": "https://example.com/中文?q=1", "groupId": null, "order": 0, "createdAt": 1756000000000.125},
+    {"id": "EF30C519-AE98-4BDF-A7A0-122737210AF4", "title": "文档", "url": "https://developer.mozilla.org", "groupId": "C8ED36D8-4428-4972-B4AB-0556A96F3629", "order": 0, "createdAt": 1756000100000},
+    {"id": "756A9097-3D5E-4A31-967D-E4F7A608CB6D", "title": "本地服务", "url": "http://[::1]:8080/test", "groupId": null, "order": 2, "createdAt": 1756000200000}
+  ]
+}
