@@ -41,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 格式：`format: "frog-bookmarks"`、`schemaVersion: 1`、`groups`、`bookmarks`。UUID、创建时间、逻辑顺序、空文件夹和显式 `groupId: null` 均保留。网页端 KV 的数据格式不同，应通过 macOS/Windows 本地备份互通。
 
-图标先读本机缓存，再在后台尝试站点 favicon、HTML 中的图标链接、Google S2。下载最多 2 MB、重定向最多 3 次、最多 2 个工作线程，扫描前 32 个有效图像帧并选择短边最大的图像，按显示尺寸居中裁剪。与 macOS 一致，图片铺满白色底板后统一裁圆角，透明区域不露出灰色占位底板。旧版缓存可继续使用，已缓存的低清图标可右键「刷新图标」重新获取。刷新失败保留旧图；缓存上限约 64 MB，内存最多 128 张图标。收起时清空排队工作、使进行中的任务失效并释放绘制表面；进行中的同步 WinHTTP 调用在短超时内退出，不阻塞 UI。
+图标先读本机缓存，再在后台尝试站点 favicon 和站点首页 HTML 中声明的图标链接，不使用 Google 等第三方图标服务兜底。PNG、ICO 等位图使用 WIC 解码；SVG 使用 Windows 11 内置 Direct2D 软件渲染，按显示尺寸生成保留透明度的 PNG 缓存。SVG 支持路径、基本形状、渐变等 Direct2D 支持的静态内容，复杂 CSS、文字和滤镜不保证完整显示。下载最多 2 MB、重定向最多 3 次、最多 2 个工作线程，位图扫描前 32 个有效图像帧并选择短边最大的图像，按显示尺寸居中裁剪。与 macOS 一致，图片铺满白色底板后统一裁圆角，透明区域不露出灰色占位底板。旧版缓存可继续使用，已缓存的低清或第三方图标可右键「刷新图标」重新从网站获取；站点没有可用图标时显示首字符，已有图标的刷新失败时保留旧图。缓存上限约 64 MB，内存最多 128 张图标。收起时清空排队工作、使进行中的任务失效并释放绘制表面；进行中的同步 WinHTTP 调用在短超时内退出，不阻塞 UI。
 
 ## 开发与验证
 
@@ -67,4 +67,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/measure-perf
 
 实际验证结果及需要人工完成的检查见 [VALIDATION.md](VALIDATION.md)。
 
-额外检查：`windows/scripts/verify-package.ps1` 在 `build/verification/` 下验证 ZIP 与隔离安装／更新／卸载；`windows/build/Release/FrogIconProbe.exe windows/build/verification/network` 使用生产图标模块抓取 GitHub 和 Microsoft 图标。网络检查不纳入离线 CTest。
+额外检查：`windows/scripts/verify-package.ps1` 在 `build/verification/` 下验证 ZIP 与隔离安装／更新／卸载；`windows/build/Release/FrogIconProbe.exe windows/build/verification/network` 使用生产图标模块强制重新抓取 GitHub、Microsoft 和 DeepSeek 平台图标，避免旧缓存掩盖抓取问题。网络检查不纳入离线 CTest。

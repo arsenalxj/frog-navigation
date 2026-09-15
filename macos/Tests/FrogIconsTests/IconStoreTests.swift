@@ -148,6 +148,59 @@ final class IconStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testLoginRedirectFallsBackToOriginalSiteIcon() async throws {
+        let page = "https://private.example/page"
+        let login = URL(string: "https://login.example/sign-in")!
+        let originalIcon = URL(string: "https://private.example/favicon.ico")!
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<html>Sign in</html>".utf8), finalURL: login),
+            originalIcon.absoluteString: IconHTTPResponse(data: try png(width: 160, height: 160), finalURL: originalIcon)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+
+        await store.load(page, force: true)
+
+        XCTAssertEqual(store.image(for: page)?.size.width, 160)
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, "https://login.example/favicon.ico", originalIcon.absoluteString])
+        let cached = await IconCache(directory: directory).read(for: URL(string: page)!)
+        XCTAssertEqual(cached?.pixelSize, 160)
+    }
+
+    @MainActor
+    func testFinalSiteRootIconKeepsPriorityOverOriginalSite() async throws {
+        let page = "https://old.example/page"
+        let finalPage = URL(string: "https://new.example/page")!
+        let finalIcon = URL(string: "https://new.example/favicon.ico")!
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<html></html>".utf8), finalURL: finalPage),
+            finalIcon.absoluteString: IconHTTPResponse(data: try png(width: 64, height: 64), finalURL: finalIcon)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+
+        await store.load(page)
+
+        XCTAssertEqual(store.image(for: page)?.size.width, 64)
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, finalIcon.absoluteString])
+    }
+
+    @MainActor
+    func testSameSiteRedirectRequestsFailedRootIconOnlyOnce() async {
+        let page = "https://example.com/private"
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<html>Sign in</html>".utf8), finalURL: URL(string: "https://example.com/login")!)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+
+        await store.load(page)
+
+        XCTAssertNil(store.image(for: page))
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, "https://example.com/favicon.ico"])
+    }
+
+    @MainActor
     func testFailedRefreshPreservesOldIconAndDoesNotPoll() async throws {
         let page = "https://example.com/page"
         let root = "https://example.com/favicon.ico"
@@ -525,6 +578,62 @@ final class IconStoreTests: XCTestCase {
         XCTAssertNil(DecodedIcon.decode(Data(repeating: 0, count: IconRequestKind.image.byteLimit + 1)))
         XCTAssertNil(DecodedIcon.decode(try png(width: 8193, height: 1)))
         XCTAssertEqual(DecodedIcon.decode(try png(width: 512, height: 512))?.image.width, 256)
+    }
+
+    func testSVGDecoderRendersViewBoxAtCacheResolutionWithTransparency() throws {
+        let data = Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 25">
+          <path fill="#ff0000" d="M0 0H25V25H0Z"/>
+        </svg>
+        """.utf8)
+        let icon = try XCTUnwrap(DecodedIcon.decode(data))
+        XCTAssertEqual(icon.image.width, 256)
+        XCTAssertEqual(icon.image.height, 128)
+        let bitmap = NSBitmapImageRep(cgImage: icon.image)
+        let red = try XCTUnwrap(bitmap.colorAt(x: 32, y: 64)?.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(red.redComponent, 1, accuracy: 0.01)
+        XCTAssertEqual(red.greenComponent, 0, accuracy: 0.01)
+        XCTAssertEqual(red.alphaComponent, 1, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(bitmap.colorAt(x: 224, y: 64)).alphaComponent, 0, accuracy: 0.01)
+        let cached = try XCTUnwrap(DecodedIcon.decode(try XCTUnwrap(icon.pngData())))
+        XCTAssertEqual(cached.image.width, 256)
+        XCTAssertEqual(cached.image.height, 128)
+    }
+
+    func testSVGDecoderRejectsInvalidDocumentAndDimensions() {
+        for source in [
+            "<svg xmlns='http://www.w3.org/2000/svg'><path",
+            "<html><body>Not an icon</body></html>",
+            "<!DOCTYPE svg [<!ENTITY size '50'>]><svg xmlns='http://www.w3.org/2000/svg' width='&size;' height='50'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='0' height='0'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='8193' height='1'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='8192' height='8192'/>"
+        ] {
+            XCTAssertNil(DecodedIcon.decode(Data(source.utf8)), source)
+        }
+    }
+
+    @MainActor
+    func testSVGWebsiteIconLoadsAndReusesPNGCacheOffline() async throws {
+        let page = "https://example.com/usage"
+        let icon = "https://cdn.example/favicon.svg"
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<link rel='icon' type='image/x-icon' href='\(icon)'>".utf8), finalURL: URL(string: page)!),
+            icon: IconHTTPResponse(data: Data("<svg xmlns='http://www.w3.org/2000/svg' width='50' height='50'><path fill='blue' d='M0 0H50V50H0Z'/></svg>".utf8), finalURL: URL(string: icon)!)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+        await store.load(page)
+        XCTAssertEqual(store.image(for: page)?.size.width, 256)
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, icon])
+
+        let offlineClient = FixtureIconClient()
+        let offline = IconStore(cacheDirectory: directory, networkingEnabled: false, client: offlineClient)
+        await offline.load(page)
+        XCTAssertEqual(offline.image(for: page)?.size.width, 256)
+        let offlineRequests = await offlineClient.requestURLs()
+        XCTAssertTrue(offlineRequests.isEmpty)
     }
 
     private func png(width: Int, height: Int) throws -> Data {
