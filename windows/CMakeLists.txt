@@ -25,7 +25,7 @@ add_library(frog_core STATIC src/core/Util.cpp src/core/Model.cpp src/core/Stora
 target_include_directories(frog_core PUBLIC src "${CMAKE_BINARY_DIR}/_deps")
 target_link_libraries(frog_core PUBLIC ole32 shell32 shlwapi bcrypt winhttp icu)
 add_library(frog_platform STATIC src/platform/Integration.cpp src/platform/Images.cpp)
-target_link_libraries(frog_platform PUBLIC frog_core windowscodecs comctl32 advapi32 user32 gdi32 oleacc)
+target_link_libraries(frog_platform PUBLIC frog_core windowscodecs d2d1 d3d11 comctl32 advapi32 user32 gdi32 oleacc)
 add_executable(Frog WIN32 src/Main.cpp src/ui/Launcher.cpp src/ui/Panels.cpp src/ui/Accessibility.cpp resources/Frog.rc)
 target_link_libraries(Frog PRIVATE frog_platform d2d1 dwrite dwmapi uxtheme imm32 uiautomationcore)
 target_link_options(Frog PRIVATE /MANIFEST:NO)

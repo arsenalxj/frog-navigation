@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import CryptoKit
 import ImageIO
@@ -8,8 +9,11 @@ struct DecodedIcon: @unchecked Sendable {
     let pixelSize: Int
 
     static func decode(_ data: Data) -> DecodedIcon? {
-        guard data.count <= IconRequestKind.image.byteLimit,
-              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        guard data.count <= IconRequestKind.image.byteLimit else { return nil }
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetType(source) != nil else {
+            return decodeSVG(data)
+        }
         var preferredIndex: Int?
         var preferredSize = 0
         for index in 0..<min(CGImageSourceGetCount(source), 32) {
@@ -29,6 +33,33 @@ struct DecodedIcon: @unchecked Sendable {
                 kCGImageSourceShouldCacheImmediately: true
               ] as CFDictionary) else { return nil }
         return DecodedIcon(image: thumbnail, pixelSize: preferredSize)
+    }
+
+    private static func decodeSVG(_ data: Data) -> DecodedIcon? {
+        // ImageIO 不解码 SVG；仅把完整的 SVG 文档交给 AppKit 的原生图像渲染器。
+        guard let document = try? XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever]),
+              document.dtd == nil,
+              let root = document.rootElement(), root.localName == "svg",
+              root.uri == "http://www.w3.org/2000/svg",
+              let vector = NSImage(data: data) else { return nil }
+        let size = vector.size
+        guard size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0, size.width <= 8192, size.height <= 8192,
+              size.width * size.height <= 16_777_216 else { return nil }
+
+        // 矢量图直接按缓存分辨率绘制，避免先栅格化为网站声明的 16/32/50 像素。
+        let scale = 256 / max(size.width, size.height)
+        let width = max(1, Int((size.width * scale).rounded()))
+        let height = max(1, Int((size.height * scale).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        vector.draw(in: NSRect(x: 0, y: 0, width: width, height: height), from: .zero, operation: .copy, fraction: 1)
+        guard let image = context.makeImage() else { return nil }
+        return DecodedIcon(image: image, pixelSize: min(width, height))
     }
 
     func pngData() -> Data? {

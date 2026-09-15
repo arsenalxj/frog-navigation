@@ -76,6 +76,49 @@ int wmain(int argc, wchar_t** argv) {
     test("layout-scales-small-display", [] { Layout layout{640, 480}; expect(layout.columns() == 3 && layout.rows() >= 1); auto last = layout.tile(layout.capacity(false) - 1, false); expect(last.x + last.width <= layout.width && last.y + last.height <= layout.height); });
     test("icon-html-relative-and-attribute-order", [] { auto urls = htmlIcons("<link href='../assets/a.png?x=1&amp;y=2' rel='shortcut icon'><link rel=icon href=/b.ico><link rel=stylesheet href=x.css>", "https://example.com/page/"); expect(urls.size() == 2); expect(urls[0] == "https://example.com/assets/a.png?x=1&y=2"); expect(urls[1] == "https://example.com/b.ico"); });
     test("icon-html-rejects-non-http", [] { expect(htmlIcons("<link rel='icon' href='data:image/png;base64,xyz'>", "https://example.com").empty()); });
+    test("icon-html-svg-with-legacy-mime", [] {
+        auto urls = htmlIcons("<link rel='icon' type='image/x-icon' href='https://cdn.example/favicon.svg'>", "https://example.com/usage");
+        expect(urls == std::vector<std::string>{"https://cdn.example/favicon.svg"});
+    });
+    test("svg-path-renders-at-requested-resolution", [] {
+        auto decoded = decodeImage(R"(<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><path fill="#ff0000" d="M0 0H25V50H0Z"/></svg>)", 128);
+        expect(decoded->width == 128 && decoded->height == 128);
+        size_t red = (64 * 128 + 32) * 4, transparent = (64 * 128 + 96) * 4;
+        expect(decoded->bgra[red] == 0 && decoded->bgra[red + 1] == 0 && decoded->bgra[red + 2] == 255 && decoded->bgra[red + 3] == 255);
+        expect(decoded->bgra[transparent + 3] == 0);
+        auto cached = decodeImage(encodePng(*decoded), 128);
+        expect(cached->bgra == decoded->bgra);
+    });
+    test("svg-viewbox-center-crop-and-alpha", [] {
+        auto decoded = decodeImage(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 96 32"><path fill="red" d="M10 20H42V52H10Z M74 20H106V52H74Z"/><path fill="#00ff00" fill-opacity="0.5" d="M42 28H74V44H42Z"/></svg>)", 32);
+        expect(decoded->bgra[3] == 0);
+        for (UINT x = 0; x < 32; ++x) {
+            size_t pixel = (16 * 32 + x) * 4;
+            expect(decoded->bgra[pixel] == 0 && decoded->bgra[pixel + 2] == 0);
+            expect(decoded->bgra[pixel + 1] >= 127 && decoded->bgra[pixel + 1] <= 128);
+            expect(decoded->bgra[pixel + 3] == decoded->bgra[pixel + 1]);
+        }
+    });
+    test("svg-rejects-invalid-document-and-size", [] {
+        for (const auto* svg : {
+            "<svg xmlns='http://www.w3.org/2000/svg'><path",
+            "<html><body>Not an icon</body></html>",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='0' height='0'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 0 32'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='4097' height='1'/>"
+        }) rejects([&] { decodeImage(svg, 64); });
+    });
+    test("svg-png-cache-loads-offline", [] {
+        Temporary temp; const std::string url = "https://example.com/usage";
+        auto rendered = decodeImage(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50"><path fill="blue" d="M0 0H50V50H0Z"/></svg>)", 64);
+        atomicWrite(temp.path / wide(hash(url) + ".png"), encodePng(*rendered));
+        std::promise<std::shared_ptr<Pixels>> loaded;
+        Images images(temp.path, true, [&](uint64_t, std::string, std::shared_ptr<Pixels> pixels) { loaded.set_value(pixels); });
+        images.resume(); images.request(url, 64);
+        auto result = loaded.get_future();
+        expect(result.wait_for(std::chrono::seconds(3)) == std::future_status::ready);
+        auto cached = result.get(); expect(cached && cached->bgra == rendered->bgra);
+    });
     test("wic-png-roundtrip-and-size", [] { Pixels image{32, 32, std::vector<unsigned char>(32 * 32 * 4, 255)}; auto png = encodePng(image); auto decoded = decodeImage(png, 64); expect(decoded->width == 64 && decoded->height == 64 && decoded->bgra.size() == 64 * 64 * 4); rejects([] { decodeImage("broken", 64); }); });
     test("wic-ico-prefers-largest-frame", [] {
         Pixels smallFrame{16, 16, std::vector<unsigned char>(16 * 16 * 4, 255)};

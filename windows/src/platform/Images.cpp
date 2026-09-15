@@ -3,6 +3,10 @@
 #include <winhttp.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <d2d1_3.h>
+#include <d2d1svg.h>
+#include <d3d11.h>
+#include <cmath>
 #include <regex>
 #include <algorithm>
 
@@ -11,6 +15,74 @@ namespace {
 ComPtr<IWICImagingFactory> factory() {
     ComPtr<IWICImagingFactory> out;
     check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&out)), "无法初始化图像解码器。"); return out;
+}
+std::shared_ptr<Pixels> decodeSvg(const std::string& bytes, UINT size) {
+    require(bytes.size() <= 2 * 1024 * 1024 && size > 0 && size <= 256, "SVG 图标尺寸超出限制。");
+    // 独立的软件渲染设备不依赖启动台窗口或显卡，随本次解码释放。
+    ComPtr<ID3D11Device> graphics;
+    check(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                           nullptr, 0, D3D11_SDK_VERSION, &graphics, nullptr, nullptr), "无法初始化 SVG 渲染设备。");
+    ComPtr<IDXGIDevice> dxgi; check(graphics.As(&dxgi), "无法初始化 SVG 图像设备。");
+    ComPtr<ID2D1Device> device; check(D2D1CreateDevice(dxgi.Get(), nullptr, &device), "无法初始化 SVG 绘图设备。");
+    ComPtr<ID2D1DeviceContext> base;
+    check(device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &base), "无法初始化 SVG 绘图上下文。");
+    ComPtr<ID2D1DeviceContext5> context; check(base.As(&context), "系统不支持原生 SVG 图标。");
+    ComPtr<IStream> stream;
+    stream.Attach(SHCreateMemStream(reinterpret_cast<const BYTE*>(bytes.data()), static_cast<UINT>(bytes.size())));
+    require(stream != nullptr, "无法读取 SVG 图标。");
+    const float targetSize = static_cast<float>(size);
+    ComPtr<ID2D1SvgDocument> document;
+    check(context->CreateSvgDocument(stream.Get(), D2D1::SizeF(targetSize, targetSize), &document), "SVG 文档无效。");
+    ComPtr<ID2D1SvgElement> root; document->GetRoot(&root);
+    require(root != nullptr && root->GetTagNameLength() == 3, "图像不是 SVG 文档。");
+    wchar_t tag[4]{}; check(root->GetTagName(tag, 4), "无法读取 SVG 根元素。");
+    require(std::wstring(tag) == L"svg", "图像不是 SVG 文档。");
+
+    D2D1_SVG_VIEWBOX viewBox{};
+    const bool hasViewBox = root->IsAttributeSpecified(L"viewBox");
+    if (hasViewBox) {
+        check(root->GetAttributeValue(L"viewBox", D2D1_SVG_ATTRIBUTE_POD_TYPE_VIEWBOX, &viewBox, sizeof(viewBox)), "SVG viewBox 无效。");
+        require(std::isfinite(viewBox.x) && std::isfinite(viewBox.y) && std::isfinite(viewBox.width) &&
+                std::isfinite(viewBox.height) && viewBox.width > 0 && viewBox.height > 0, "SVG viewBox 尺寸无效。");
+    }
+    auto dimension = [&](const wchar_t* name, float fallback) {
+        if (!root->IsAttributeSpecified(name)) return fallback;
+        D2D1_SVG_LENGTH length{};
+        check(root->GetAttributeValue(name, &length), "SVG 宽高无效。");
+        require(std::isfinite(length.value) && length.value > 0, "SVG 宽高无效。");
+        return length.units == D2D1_SVG_LENGTH_UNITS_PERCENTAGE ? fallback * length.value / 100.0f : length.value;
+    };
+    const float width = dimension(L"width", hasViewBox ? viewBox.width : targetSize);
+    const float height = dimension(L"height", hasViewBox ? viewBox.height : targetSize);
+    require(std::isfinite(width) && std::isfinite(height) && width > 0 && height > 0 && width <= 4096 && height <= 4096,
+            "SVG 图标尺寸超出限制。");
+    // 明确根视口后再按短边放大并居中裁剪，与现有位图图标的铺满规则一致。
+    check(document->SetViewportSize(D2D1::SizeF(width, height)), "无法设置 SVG 视口。");
+    check(root->SetAttributeValue(L"width", D2D1_SVG_LENGTH{width, D2D1_SVG_LENGTH_UNITS_NUMBER}), "无法设置 SVG 宽度。");
+    check(root->SetAttributeValue(L"height", D2D1_SVG_LENGTH{height, D2D1_SVG_LENGTH_UNITS_NUMBER}), "无法设置 SVG 高度。");
+
+    const auto format = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+    ComPtr<ID2D1Bitmap1> target;
+    auto targetProperties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET, format, 96, 96);
+    check(context->CreateBitmap(D2D1::SizeU(size, size), nullptr, 0, &targetProperties, &target), "无法创建 SVG 图像。");
+    context->SetTarget(target.Get()); context->SetDpi(96, 96);
+    const float scale = targetSize / std::min(width, height);
+    require(std::isfinite(scale) && std::isfinite(width * scale) && std::isfinite(height * scale), "SVG 图标比例超出限制。");
+    context->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) *
+                          D2D1::Matrix3x2F::Translation((targetSize - width * scale) / 2, (targetSize - height * scale) / 2));
+    context->BeginDraw(); context->Clear(D2D1::ColorF(0, 0, 0, 0)); context->DrawSvgDocument(document.Get());
+    check(context->EndDraw(), "SVG 图标渲染失败。");
+    context->SetTarget(nullptr);
+
+    ComPtr<ID2D1Bitmap1> readable;
+    auto readProperties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW, format, 96, 96);
+    check(context->CreateBitmap(D2D1::SizeU(size, size), nullptr, 0, &readProperties, &readable), "无法创建 SVG 像素缓冲。");
+    check(readable->CopyFromBitmap(nullptr, target.Get(), nullptr), "无法复制 SVG 图像。");
+    D2D1_MAPPED_RECT mapped{}; check(readable->Map(D2D1_MAP_OPTIONS_READ, &mapped), "无法读取 SVG 像素。");
+    ScopeExit unmap{[&] { readable->Unmap(); }};
+    auto out = std::make_shared<Pixels>(); out->width = out->height = size; out->bgra.resize(static_cast<size_t>(size) * size * 4);
+    for (UINT y = 0; y < size; ++y) std::copy_n(mapped.bits + static_cast<size_t>(y) * mapped.pitch, size * 4, out->bgra.data() + static_cast<size_t>(y) * size * 4);
+    return out;
 }
 struct Internet {
     HINTERNET value{};
@@ -69,7 +141,10 @@ std::shared_ptr<Pixels> decodeImage(const std::string& bytes, UINT size, bool sq
     require(!bytes.empty() && bytes.size() <= documentLimit, "图像数据无效。");
     auto imaging = factory(); ComPtr<IWICStream> stream; check(imaging->CreateStream(&stream), "无法建立图像流。");
     check(stream->InitializeFromMemory(reinterpret_cast<BYTE*>(const_cast<char*>(bytes.data())), static_cast<DWORD>(bytes.size())), "无法读取图像。");
-    ComPtr<IWICBitmapDecoder> decoder; check(imaging->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &decoder), "图像格式不受支持。");
+    ComPtr<IWICBitmapDecoder> decoder;
+    const HRESULT decoded = imaging->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &decoder);
+    if (FAILED(decoded) && square) return decodeSvg(bytes, size);
+    check(decoded, "图像格式不受支持。");
     ComPtr<IWICBitmapFrameDecode> frame; UINT width{}, height{}, count{};
     check(decoder->GetFrameCount(&count), "无法读取图像帧。");
     // 与 macOS 一致，按有效短边选择最大的图像，避免放大 ICO 的低分辨率首帧。
@@ -160,8 +235,7 @@ std::shared_ptr<Pixels> Images::load(const Job& job) {
     auto cancelled = [&] { return job.generation != generation_.load(); };
     if (!job.refresh && fs::exists(path)) try { return decodeImage(readFile(path, 2 * 1024 * 1024), job.size); } catch (const std::exception&) {}
     if (offline_ || cancelled()) return {};
-    auto value = wide(job.url); URL_COMPONENTS parts{sizeof(parts)}; parts.dwHostNameLength = static_cast<DWORD>(-1);
-    require(WinHttpCrackUrl(value.c_str(), 0, 0, &parts), "无效的图标源地址。");
+    require(validUrl(job.url), "无效的图标源地址。");
     auto origin = job.url.substr(0, job.url.find('/', job.url.find("://") + 3));
     std::shared_ptr<Pixels> result;
     auto attempt = [&](const std::string& url) { if (!cancelled()) try { result = decodeImage(download(url, 2 * 1024 * 1024, false, cancelled), job.size); } catch (const std::exception&) {} };
@@ -170,7 +244,6 @@ std::shared_ptr<Pixels> Images::load(const Job& job) {
         auto html = download(origin + "/", 10240, true, cancelled);
         for (const auto& icon : htmlIcons(html, origin + "/")) { attempt(icon); if (result) break; }
     } catch (const std::exception&) {}
-    if (!result) attempt("https://www.google.com/s2/favicons?domain=" + percentEncode(utf8(std::wstring(parts.lpszHostName, parts.dwHostNameLength))) + "&sz=128");
     if (result && !cancelled()) try { fs::create_directories(cache_); atomicWrite(path, encodePng(*result)); prune(); } catch (const std::exception&) {}
     return cancelled() ? nullptr : result;
 }
