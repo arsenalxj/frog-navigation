@@ -178,6 +178,11 @@ private actor IconPipeline {
            let response = try? await client.fetch(fallback, kind: .image), let decoded = DecodedIcon.decode(response.data) {
             best = (decoded, response.finalURL)
         }
+        if best == nil, !Task.isCancelled, let originalFallback = IconURL.rootIcon(for: page),
+           originalFallback != IconURL.rootIcon(for: finalPage),
+           let response = try? await client.fetch(originalFallback, kind: .image), let decoded = DecodedIcon.decode(response.data) {
+            best = (decoded, response.finalURL)
+        }
         guard !Task.isCancelled, let best else { return nil }
         // 缓存落盘失败不影响当前会话展示，也不替换用户的书签数据。
         try? await cache.save(best.icon, originalPage: page, finalPage: finalPage, resource: best.source)

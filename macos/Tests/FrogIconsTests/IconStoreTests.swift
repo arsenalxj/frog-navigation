@@ -148,6 +148,59 @@ final class IconStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testLoginRedirectFallsBackToOriginalSiteIcon() async throws {
+        let page = "https://private.example/page"
+        let login = URL(string: "https://login.example/sign-in")!
+        let originalIcon = URL(string: "https://private.example/favicon.ico")!
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<html>Sign in</html>".utf8), finalURL: login),
+            originalIcon.absoluteString: IconHTTPResponse(data: try png(width: 160, height: 160), finalURL: originalIcon)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+
+        await store.load(page, force: true)
+
+        XCTAssertEqual(store.image(for: page)?.size.width, 160)
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, "https://login.example/favicon.ico", originalIcon.absoluteString])
+        let cached = await IconCache(directory: directory).read(for: URL(string: page)!)
+        XCTAssertEqual(cached?.pixelSize, 160)
+    }
+
+    @MainActor
+    func testFinalSiteRootIconKeepsPriorityOverOriginalSite() async throws {
+        let page = "https://old.example/page"
+        let finalPage = URL(string: "https://new.example/page")!
+        let finalIcon = URL(string: "https://new.example/favicon.ico")!
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<html></html>".utf8), finalURL: finalPage),
+            finalIcon.absoluteString: IconHTTPResponse(data: try png(width: 64, height: 64), finalURL: finalIcon)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+
+        await store.load(page)
+
+        XCTAssertEqual(store.image(for: page)?.size.width, 64)
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, finalIcon.absoluteString])
+    }
+
+    @MainActor
+    func testSameSiteRedirectRequestsFailedRootIconOnlyOnce() async {
+        let page = "https://example.com/private"
+        let client = FixtureIconClient([
+            page: IconHTTPResponse(data: Data("<html>Sign in</html>".utf8), finalURL: URL(string: "https://example.com/login")!)
+        ])
+        let store = IconStore(cacheDirectory: directory, networkingEnabled: true, client: client)
+
+        await store.load(page)
+
+        XCTAssertNil(store.image(for: page))
+        let requests = await client.requestURLs()
+        XCTAssertEqual(requests, [page, "https://example.com/favicon.ico"])
+    }
+
+    @MainActor
     func testFailedRefreshPreservesOldIconAndDoesNotPoll() async throws {
         let page = "https://example.com/page"
         let root = "https://example.com/favicon.ico"
