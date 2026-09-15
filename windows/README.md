@@ -41,7 +41,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 格式：`format: "frog-bookmarks"`、`schemaVersion: 1`、`groups`、`bookmarks`。UUID、创建时间、逻辑顺序、空文件夹和显式 `groupId: null` 均保留。网页端 KV 的数据格式不同，应通过 macOS/Windows 本地备份互通。
 
-图标先读本机缓存，再在后台尝试站点 favicon 和站点首页 HTML 中声明的图标链接，不使用 Google 等第三方图标服务兜底。PNG、ICO 等位图使用 WIC 解码；SVG 使用 Windows 11 内置 Direct2D 软件渲染，按显示尺寸生成保留透明度的 PNG 缓存。SVG 支持路径、基本形状、渐变等 Direct2D 支持的静态内容，复杂 CSS、文字和滤镜不保证完整显示。下载最多 2 MB、重定向最多 3 次、最多 2 个工作线程，位图扫描前 32 个有效图像帧并选择短边最大的图像，按显示尺寸居中裁剪。与 macOS 一致，图片铺满白色底板后统一裁圆角，透明区域不露出灰色占位底板。旧版缓存可继续使用，已缓存的低清或第三方图标可右键「刷新图标」重新从网站获取；站点没有可用图标时显示首字符，已有图标的刷新失败时保留旧图。缓存上限约 64 MB，内存最多 128 张图标。收起时清空排队工作、使进行中的任务失效并释放绘制表面；进行中的同步 WinHTTP 调用在短超时内退出，不阻塞 UI。
+图标由 1 个专用线程读取本机缓存，缺失或损坏时转交 2 个慢任务线程，后台尝试站点 favicon 和站点首页 HTML 中声明的图标链接，不使用 Google 等第三方图标服务兜底。缓存读取与网络下载使用独立队列，慢网站不会阻塞已有缓存；壁纸读取、模糊在慢任务队列合并并优先调度。下载最多 2 MB、重定向最多 3 次、网络并发最多 2 个。PNG、ICO 等位图使用 WIC 解码，扫描前 32 个有效图像帧并选择短边最大的图像，按显示尺寸居中裁剪。SVG 使用 Windows 11 内置 Direct2D 软件渲染，按显示尺寸生成保留透明度的 PNG 缓存；支持路径、基本形状、渐变等 Direct2D 支持的静态内容，复杂 CSS、文字和滤镜不保证完整显示。
+
+与 macOS 一致，图片铺满白色底板后统一裁圆角，透明区域不露出灰色占位底板。旧版 PNG 缓存可直接复用；低清或第三方图标可右键「刷新图标」重新从网站获取，失败时保留旧图。站点没有可用图标时显示首字符。磁盘缓存上限约 64 MB，内存最多 128 张图标，优先淘汰当前页面未显示、最久未使用的位图，文件夹缩略图同样参与使用记录。正常收起保留有效绘制表面、图标与壁纸，再次展开直接使用；退出、设备失效或 DPI 变化需要重建时释放，之后从 PNG 缓存恢复。收起仍清空排队任务并使旧请求失效，进行中的同步 WinHTTP 调用按短超时结束。线程空闲时休眠。首次启动或位图已淘汰时异步读取缓存，可能短暂显示占位图；已有缓存的加载不再等待网络。
 
 ## 开发与验证
 
@@ -53,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/build.ps1
 
 构建前从共享的 `assets/frog-navigation.png` 自动生成 `resources/AppIcon.ico`（16、24、32、48、64、128、256 像素）。保留原图完整构图和背景，关于页复用同一图标。
 
-默认构建 x64 Release，执行核心测试和隔离原生运行测试，然后生成 `windows/dist/Frog-windows-x64.zip`。`-Configuration Debug` 构建调试版，`-SkipPackage` 只验证。`-SkipTests` 用于复用同一源码已通过的检查结果，或确实无法启动桌面的构建环境；后一种情况须记录运行检查尚未通过。原生运行测试会短暂展开自己的隔离窗口。
+默认构建 x64 Release，执行核心测试、图标队列测试和隔离原生运行测试，然后生成 `windows/dist/Frog-windows-x64.zip`。`-Configuration Debug` 构建调试版，`-SkipPackage` 只验证。`-SkipTests` 用于复用同一源码已通过的检查结果，或确实无法启动桌面的构建环境；后一种情况须记录运行检查尚未通过。原生运行测试会短暂展开自己的隔离窗口。
 
 ```powershell
 .\windows\build\Release\Frog.exe --offline --data-directory "D:\Frog-测试" --diagnostics "D:\Frog-测试日志.jsonl"
@@ -61,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/build.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/measure-performance.ps1
 ```
 
-`--data-directory` 自动启用隔离实例，偏好只在内存中保存，使用独立临时图标缓存，禁止修改登录启动；可与正式实例共存。`--offline` 不发出图标请求；`--background` 静默驻留并推迟主界面创建；`--diagnostics [路径]` 写入 JSONL 事件，无路径时使用 `%TEMP%\Frog-diagnostics.jsonl`。
+`--data-directory` 自动启用隔离实例，偏好只在内存中保存，使用独立临时图标缓存，禁止修改登录启动；可与正式实例共存。`--offline` 只读取本机图标缓存，不下载网站图标；`--background` 静默驻留并推迟主界面创建；`--diagnostics [路径]` 写入 JSONL 事件，无路径时使用 `%TEMP%\Frog-diagnostics.jsonl`。
 
 性能脚本生成 1,000 条隔离数据，测量新进程可操作时间、三次再次展开、收起 30 秒后的私有提交内存与工作集，再采样 10 秒 CPU。CPU 以单核 100% 为口径，内存以十进制 MB 比较目标。脚本不清空系统文件缓存；日志和硬件信息位于 `windows/build/performance/`。图形显存计数器不可用时报告为空，不能据此当作零显存。
 

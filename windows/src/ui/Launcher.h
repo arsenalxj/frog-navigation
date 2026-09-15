@@ -40,8 +40,10 @@ private:
     void drawTile(const Item& item, Rect rect, int index, float opacity = 1);
     void drawIcon(const Bookmark& bookmark, Rect rect, float opacity = 1);
     void drawPanel();
-    void receivedImage(std::string url, std::shared_ptr<Pixels> pixels);
+    void receivedImage(Images::Result result);
+    std::vector<const Bookmark*> visibleBookmarks() const;
     void requestImages();
+    void requestWallpaper();
     void dispatch(std::function<void()> action);
     void loadInitial();
     void reload();
@@ -107,9 +109,12 @@ private:
     std::vector<std::string> locationChoices_;
     ComPtr<ID2D1Factory> d2d_; ComPtr<IDWriteFactory> dwrite_; ComPtr<ID2D1HwndRenderTarget> target_; ComPtr<ID2D1SolidColorBrush> brush_;
     std::map<std::pair<int, bool>, ComPtr<IDWriteTextFormat>> formats_;
-    std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> bitmaps_;
+    struct IconBitmap { ComPtr<ID2D1Bitmap> bitmap; uint64_t used{}; };
+    std::unordered_map<std::string, IconBitmap> bitmaps_;
+    uint64_t bitmapUse_ = 0, rendererGeneration_ = 0;
+    size_t paintedIcons_ = 0, paintedReadyIcons_ = 0;
     ComPtr<ID2D1Bitmap> wallpaper_;
-    std::set<std::string> requestedIcons_;
+    std::unordered_map<std::string, uint64_t> requestedIcons_;
     std::shared_ptr<AccessibleState> accessibility_ = std::make_shared<AccessibleState>();
     ComPtr<IRawElementProviderSimple> provider_;
     std::map<int, std::string> accessibleActions_;

@@ -9,7 +9,8 @@ int wmain(int argc, wchar_t** argv) {
         auto directory = fs::absolute(argv[1]); fs::create_directories(directory);
         std::promise<void> finished; std::mutex mutex; Json results = Json::array();
         const std::vector<std::string> urls{"https://github.com", "https://www.microsoft.com", "https://platform.deepseek.com/usage"};
-        Images images(directory, false, [&](uint64_t, std::string url, std::shared_ptr<Pixels> pixels) {
+        Images images(directory, false, [&](Images::Result result) {
+            auto& url = result.url; auto& pixels = result.pixels;
             std::lock_guard lock(mutex);
             results.push_back({{"url", url}, {"loaded", pixels != nullptr}, {"width", pixels ? pixels->width : 0}, {"height", pixels ? pixels->height : 0}});
             if (results.size() == urls.size()) finished.set_value();

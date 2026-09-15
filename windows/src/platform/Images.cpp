@@ -201,39 +201,78 @@ std::vector<std::string> htmlIcons(const std::string& html, const std::string& b
     return out;
 }
 Images::Images(fs::path cache, bool offline, Completion completion) : cache_(std::move(cache)), offline_(offline), completion_(std::move(completion)) {
-    for (int i = 0; i < 2; ++i) workers_.emplace_back([this] { run(); });
+    workers_.emplace_back([this] { run(true); });
+    for (int i = 0; i < 2; ++i) workers_.emplace_back([this] { run(false); });
 }
 Images::~Images() {
-    { std::lock_guard lock(mutex_); stopping_ = true; ++generation_; jobs_.clear(); } condition_.notify_all();
+    { std::lock_guard lock(mutex_); stopping_ = true; ++generation_; cacheJobs_.clear(); slowJobs_.clear(); pending_.clear(); }
+    cacheCondition_.notify_all(); slowCondition_.notify_all();
     for (auto& worker : workers_) worker.join();
 }
-void Images::pause() { std::lock_guard lock(mutex_); paused_ = true; ++generation_; jobs_.clear(); pending_.clear(); }
+void Images::pause() { std::lock_guard lock(mutex_); paused_ = true; ++generation_; cacheJobs_.clear(); slowJobs_.clear(); pending_.clear(); }
 void Images::resume() { std::lock_guard lock(mutex_); paused_ = false; }
-void Images::request(const std::string& url, UINT size, bool refresh) {
+uint64_t Images::request(const std::string& url, UINT size, bool refresh) {
     std::lock_guard lock(mutex_);
-    if (paused_ || stopping_ || pending_.contains(url) || jobs_.size() >= 128) return;
-    pending_.insert(url); jobs_.push_back({url, std::clamp(size, 32u, 192u), refresh, generation_.load(), {}}); condition_.notify_one();
+    if (paused_ || stopping_) return 0;
+    size = std::clamp(size, 32u, 192u); refresh = refresh && !offline_;
+    if (auto it = pending_.find(url); it != pending_.end()) {
+        if (it->second.size >= size && (!refresh || it->second.refresh)) return it->second.request;
+        size = std::max(size, it->second.size); refresh = refresh || it->second.refresh;
+    }
+    auto& queue = refresh ? slowJobs_ : cacheJobs_;
+    if (queue.size() >= 128 && std::none_of(queue.begin(), queue.end(), [&](const Job& job) { return job.url == url; })) return 0;
+    // 同一 URL 的较大尺寸或显式刷新取代旧任务；进行中的任务通过标识检查失效。
+    std::erase_if(cacheJobs_, [&](const Job& job) { return job.url == url; });
+    std::erase_if(slowJobs_, [&](const Job& job) { return job.url == url; });
+    auto now = milliseconds(); Job job{url, size, refresh, generation_.load(), ++nextRequest_, {}, now, now};
+    pending_[url] = job; queue.push_back(job);
+    (refresh ? slowCondition_ : cacheCondition_).notify_one(); return job.request;
 }
-void Images::wallpaper(HMONITOR monitor) {
-    std::lock_guard lock(mutex_); if (paused_ || stopping_) return;
-    jobs_.push_front({"__wallpaper__", 128, false, generation_.load(), monitor}); condition_.notify_one();
+uint64_t Images::wallpaper(HMONITOR monitor) {
+    std::lock_guard lock(mutex_); if (paused_ || stopping_ || !monitor) return 0;
+    if (auto it = pending_.find("__wallpaper__"); it != pending_.end() && it->second.monitor == monitor) return it->second.request;
+    std::erase_if(slowJobs_, [](const Job& job) { return job.monitor != nullptr; });
+    auto now = milliseconds(); Job job{"__wallpaper__", 128, false, generation_.load(), ++nextRequest_, monitor, now, now};
+    pending_[job.url] = job; slowJobs_.push_front(job); slowCondition_.notify_one(); return job.request;
 }
-void Images::run() {
+bool Images::currentLocked(const Job& job) const {
+    auto it = pending_.find(job.url);
+    return !stopping_ && !paused_ && job.generation == generation_ && it != pending_.end() && it->second.request == job.request;
+}
+bool Images::current(const Job& job) { std::lock_guard lock(mutex_); return currentLocked(job); }
+void Images::complete(const Job& job, std::shared_ptr<Pixels> pixels, Source source, bool deferred) {
+    { std::lock_guard lock(mutex_); if (!currentLocked(job)) return; pending_.erase(job.url); }
+    completion_({job.generation, job.request, job.url, std::move(pixels), source, deferred, job.queueMs, job.loadMs, milliseconds() - job.requestedAt});
+}
+void Images::run(bool cacheWorker) {
     HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     ScopeExit cleanup{[&] { if (SUCCEEDED(initialized)) CoUninitialize(); }};
+    auto& queue = cacheWorker ? cacheJobs_ : slowJobs_;
+    auto& condition = cacheWorker ? cacheCondition_ : slowCondition_;
     for (;;) {
         Job job;
-        { std::unique_lock lock(mutex_); condition_.wait(lock, [&] { return stopping_ || !jobs_.empty(); }); if (stopping_) return; job = jobs_.front(); jobs_.pop_front(); }
+        { std::unique_lock lock(mutex_); condition.wait(lock, [&] { return stopping_ || !queue.empty(); }); if (stopping_) return;
+            job = std::move(queue.front()); queue.pop_front(); if (!currentLocked(job)) continue; }
+        auto started = milliseconds(); job.queueMs += started - job.queuedAt;
         std::shared_ptr<Pixels> pixels;
-        try { pixels = job.monitor ? loadWallpaper(job.monitor) : load(job); } catch (const std::exception&) {}
-        { std::lock_guard lock(mutex_); if (job.generation != generation_) continue; pending_.erase(job.url); }
-        completion_(job.generation, job.url, std::move(pixels));
+        try { pixels = cacheWorker ? loadCache(job) : (job.monitor ? loadWallpaper(job.monitor) : downloadIcon(job)); } catch (const std::exception&) {}
+        job.loadMs += milliseconds() - started;
+        bool deferred = false;
+        if (cacheWorker && !pixels && !offline_) {
+            std::lock_guard lock(mutex_); if (!currentLocked(job)) continue;
+            if (slowJobs_.size() < 128) { job.queuedAt = milliseconds(); slowJobs_.push_back(job); slowCondition_.notify_one(); continue; }
+            deferred = true;
+        }
+        complete(job, std::move(pixels), cacheWorker ? Source::cache : (job.monitor ? Source::wallpaper : Source::network), deferred);
     }
 }
-std::shared_ptr<Pixels> Images::load(const Job& job) {
+std::shared_ptr<Pixels> Images::loadCache(const Job& job) {
     auto path = cache_ / wide(hash(job.url) + ".png");
-    auto cancelled = [&] { return job.generation != generation_.load(); };
-    if (!job.refresh && fs::exists(path)) try { return decodeImage(readFile(path, 2 * 1024 * 1024), job.size); } catch (const std::exception&) {}
+    if (current(job) && fs::exists(path)) return decodeImage(readFile(path, 2 * 1024 * 1024), job.size);
+    return {};
+}
+std::shared_ptr<Pixels> Images::downloadIcon(const Job& job) {
+    auto cancelled = [&] { return !current(job); };
     if (offline_ || cancelled()) return {};
     require(validUrl(job.url), "无效的图标源地址。");
     auto origin = job.url.substr(0, job.url.find('/', job.url.find("://") + 3));
@@ -244,7 +283,12 @@ std::shared_ptr<Pixels> Images::load(const Job& job) {
         auto html = download(origin + "/", 10240, true, cancelled);
         for (const auto& icon : htmlIcons(html, origin + "/")) { attempt(icon); if (result) break; }
     } catch (const std::exception&) {}
-    if (result && !cancelled()) try { fs::create_directories(cache_); atomicWrite(path, encodePng(*result)); prune(); } catch (const std::exception&) {}
+    if (result && !cancelled()) try {
+        auto png = encodePng(*result);
+        // 缓存发布串行化，避免已经被取代的下载在新结果之后写回旧图；不占用任务队列锁。
+        std::lock_guard lock(cacheWriteMutex_);
+        if (!cancelled()) { fs::create_directories(cache_); atomicWrite(cache_ / wide(hash(job.url) + ".png"), png); prune(); }
+    } catch (const std::exception&) {}
     return cancelled() ? nullptr : result;
 }
 std::shared_ptr<Pixels> Images::loadWallpaper(HMONITOR monitor) {

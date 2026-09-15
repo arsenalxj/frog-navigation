@@ -7,10 +7,11 @@
 #include <uxtheme.h>
 #include <cmath>
 #include <algorithm>
+#include <set>
 
 namespace frog {
 namespace {
-constexpr UINT timerAnimation = 1, timerLongPress = 2, timerDrag = 3, timerStatus = 4, timerReload = 5;
+constexpr UINT timerAnimation = 1, timerLongPress = 2, timerDrag = 3, timerStatus = 4, timerReload = 5, timerImageRetry = 6;
 D2D1_RECT_F drect(Rect r) { return D2D1::RectF(r.x, r.y, r.x + r.width, r.y + r.height); }
 D2D1_COLOR_F color(UINT32 rgb, float alpha = 1) { return D2D1::ColorF(rgb, alpha); }
 D2D1_COLOR_F systemColor(int index) { COLORREF c = GetSysColor(index); return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f); }
@@ -32,8 +33,14 @@ Launcher::Launcher(Options options, Instance& instance)
     try { hotkey_.set(controller_, preferences_.hotkey); } catch (const std::exception& error) { status_ = error.what(); statusPersistent_ = true; }
     corners_.configure(controller_, preferences_.cornersEnabled, preferences_.corners);
     cacheDirectory_ = options_.isolated ? fs::temp_directory_path() / wide("Frog-session-" + uuid()) : localDirectory() / L"IconCache";
-    images_ = std::make_unique<Images>(cacheDirectory_, options_.offline, [this](uint64_t generation, std::string url, std::shared_ptr<Pixels> pixels) { dispatch([this, generation, url = std::move(url), pixels = std::move(pixels)]() mutable { if (images_ && generation == images_->generation()) receivedImage(std::move(url), std::move(pixels)); }); });
-    tray(true); diagnostics_.event("process_started", {{"isolated", options_.isolated}, {"offline", options_.offline}, {"background", options_.background}});
+    images_ = std::make_unique<Images>(cacheDirectory_, options_.offline, [this](Images::Result result) {
+        dispatch([this, result = std::move(result)]() mutable {
+            auto requested = requestedIcons_.find(result.url);
+            if (images_ && result.generation == images_->generation() && requested != requestedIcons_.end() && requested->second == result.request)
+                receivedImage(std::move(result));
+        });
+    });
+    tray(true); diagnostics_.event("process_started", {{"isolated", options_.isolated}, {"offline", options_.offline}, {"background", options_.background}, {"iconCacheDirectory", utf8(cacheDirectory_.wstring())}});
     loadInitial();
 }
 Launcher::~Launcher() {
@@ -78,7 +85,10 @@ LRESULT Launcher::controllerMessage(UINT message, WPARAM w, LPARAM l) {
     case WM_HOTKEY: if (visible_) hide(); else show(); return 0;
     case wmCorner: if (!visible_ && !systemPanel_) show(); return 0;
     case wmDirectory: if (!quitting_) SetTimer(controller_, timerReload, 180, nullptr); return 0;
-    case WM_TIMER: if (w == timerReload) { KillTimer(controller_, timerReload); reload(); } return 0;
+    case WM_TIMER:
+        if (w == timerReload) { KillTimer(controller_, timerReload); reload(); }
+        else if (w == timerImageRetry) { KillTimer(controller_, timerImageRetry); requestImages(); }
+        return 0;
     case wmTray:
         if (LOWORD(l) == WM_CONTEXTMENU || LOWORD(l) == WM_RBUTTONUP) trayMenu();
         else if (LOWORD(l) == NIN_SELECT || LOWORD(l) == NIN_KEYSELECT) { if (visible_) hide(); else show(); } return 0;
@@ -109,11 +119,11 @@ void Launcher::show(bool showSettings) {
     if (quitting_) return;
     if (visible_) { if (showSettings) settings(); SetForegroundWindow(window_); return; }
     showStart_ = milliseconds(); paintPending_ = true; createWindow(); place(true); visible_ = true;
-    images_->resume(); corners_.suppress(true);
+    images_->resume(); corners_.suppress(true); requestImages();
     ShowWindow(window_, SW_SHOWNORMAL); SetForegroundWindow(window_);
     if (showSettings) settings();
     if (panel_ == Panel::none) SetFocus(search_); else if (!controls_.empty()) SetFocus(controls_.begin()->second);
-    animate(); reload(); requestImages(); if (!theme_.highContrast) images_->wallpaper(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST));
+    animate(); reload(); requestWallpaper();
     diagnostics_.event("show_requested", {{"first", firstShow_}});
 }
 void Launcher::hide() {
@@ -121,7 +131,8 @@ void Launcher::hide() {
     if (panel_ == Panel::bookmark) readDraft();
     cancelDrag(); hotkeyCapture_ = false; visible_ = false; paintPending_ = false;
     KillTimer(window_, timerAnimation); KillTimer(window_, timerLongPress); KillTimer(window_, timerDrag); KillTimer(window_, timerStatus);
-    animationStart_ = 0; view_.organizing = false; ShowWindow(window_, SW_HIDE); images_->pause(); releaseRenderer();
+    KillTimer(controller_, timerImageRetry);
+    animationStart_ = 0; view_.organizing = false; ShowWindow(window_, SW_HIDE); images_->pause(); requestedIcons_.clear();
     corners_.suppress(systemPanel_); savePage(); diagnostics_.event("hidden");
 }
 void Launcher::quit() {
@@ -142,7 +153,13 @@ void Launcher::updateLayout() {
     float x = (view_.layout.width - 380) / 2;
     auto placeControl = [&](HWND handle, float px, float py, float width, float height) { MoveWindow(handle, static_cast<int>(px * dpiScale_), static_cast<int>(py * dpiScale_), static_cast<int>(width * dpiScale_), static_cast<int>(height * dpiScale_), TRUE); };
     placeControl(search_, x + 34, 42, 304, 22); placeControl(settingsButton_, x + 396, 34, 36, 36); placeControl(addButton_, x + 438, 34, 36, 36);
-    if (target_) { target_->SetDpi(96 * dpiScale_, 96 * dpiScale_); target_->Resize(D2D1::SizeU(rect.right, rect.bottom)); }
+    if (target_) {
+        target_->SetDpi(96 * dpiScale_, 96 * dpiScale_); auto size = target_->GetPixelSize();
+        if (size.width != static_cast<UINT>(rect.right) || size.height != static_cast<UINT>(rect.bottom)) {
+            auto result = target_->Resize(D2D1::SizeU(rect.right, rect.bottom));
+            if (result == D2DERR_RECREATE_TARGET) { releaseRenderer(); requestWallpaper(); } else check(result, "无法调整绘制表面。");
+        }
+    }
     view_.clamp(snapshot_.document); visibleItems_ = view_.visibleItems(snapshot_.document);
     layoutPanelControls(); syncAccessibility(); requestImages(); invalidate();
 }
@@ -166,6 +183,7 @@ void Launcher::ensureRenderer() {
     RECT rect{}; GetClientRect(window_, &rect);
     auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_IGNORE), 96 * dpiScale_, 96 * dpiScale_);
     check(d2d_->CreateHwndRenderTarget(props, D2D1::HwndRenderTargetProperties(window_, D2D1::SizeU(rect.right, rect.bottom)), &target_), "无法建立绘制表面。");
+    ++rendererGeneration_;
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE); target_->CreateSolidColorBrush(color(0xffffff), &brush_);
 }
 void Launcher::releaseRenderer() { bitmaps_.clear(); wallpaper_.Reset(); requestedIcons_.clear(); brush_.Reset(); target_.Reset(); formats_.clear(); }
@@ -187,13 +205,15 @@ void Launcher::text(const std::wstring& value, Rect rect, float size, D2D1_COLOR
 }
 void Launcher::drawIcon(const Bookmark& bookmark, Rect rect, float opacity) {
     auto found = bitmaps_.find(bookmark.url);
+    ++paintedIcons_;
     float radius = rect.width * .22f;
     if (found != bitmaps_.end()) {
+        ++paintedReadyIcons_; found->second.used = ++bitmapUse_;
         // 透明 favicon 使用与 macOS 相同的白色底板，图片铺满后统一裁圆角。
         rectangle(rect, color(0xffffff, .95f * opacity), radius);
         ComPtr<ID2D1RoundedRectangleGeometry> geometry; d2d_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(drect(rect), radius, radius), &geometry);
         ComPtr<ID2D1Layer> layer; target_->CreateLayer(&layer); auto parameters = D2D1::LayerParameters(); parameters.geometricMask = geometry.Get();
-        target_->PushLayer(parameters, layer.Get()); target_->DrawBitmap(found->second.Get(), drect(rect), opacity); target_->PopLayer();
+        target_->PushLayer(parameters, layer.Get()); target_->DrawBitmap(found->second.bitmap.Get(), drect(rect), opacity); target_->PopLayer();
     } else {
         rectangle(rect, color(theme_.dark ? 0x41434c : 0xd7dce5, opacity), radius);
         auto title = wide(bookmark.title); if (!title.empty()) title.resize((title[0] >= 0xD800 && title[0] <= 0xDBFF && title.size() > 1) ? 2 : 1);
@@ -238,7 +258,7 @@ void Launcher::drawTile(const Item& item, Rect rect, int index, float opacity) {
 void Launcher::paint() {
     PAINTSTRUCT paint{}; BeginPaint(window_, &paint); ScopeExit finish{[&] { EndPaint(window_, &paint); }};
     if (!visible_) return;
-    ensureRenderer(); target_->BeginDraw(); target_->SetTransform(D2D1::Matrix3x2F::Identity());
+    ensureRenderer(); paintedIcons_ = paintedReadyIcons_ = 0; target_->BeginDraw(); target_->SetTransform(D2D1::Matrix3x2F::Identity());
     float w = view_.layout.width, h = view_.layout.height;
     auto ink = theme_.highContrast ? systemColor(COLOR_WINDOWTEXT) : color(theme_.dark ? 0xf2f2f2 : 0x202020);
     auto background = theme_.highContrast ? systemColor(COLOR_WINDOW) : color(theme_.dark ? 0x202024 : 0xf3f3f3);
@@ -292,11 +312,12 @@ void Launcher::paint() {
         text(wide(status_), {(w - statusWidth) / 2 + 8, y + 2, statusWidth - 16, 44}, 12, theme_.highContrast ? systemColor(COLOR_INFOTEXT) : ink, false, false, true);
     }
     auto result = target_->EndDraw();
-    if (result == D2DERR_RECREATE_TARGET) { releaseRenderer(); requestImages(); invalidate(); }
+    if (result == D2DERR_RECREATE_TARGET) { releaseRenderer(); requestImages(); requestWallpaper(); invalidate(); }
     else check(result, "界面绘制失败。");
-    if (paintPending_ && loaded_) {
+    if (paintPending_ && loaded_ && SUCCEEDED(result)) {
         paintPending_ = false;
-        diagnostics_.event(firstShow_ ? "first_interactive" : "reopened", {{"durationMs", milliseconds() - showStart_}, {"bookmarks", snapshot_.document.bookmarks.size()}, {"dpi", dpiScale_ * 96}}); firstShow_ = false;
+        diagnostics_.event(firstShow_ ? "first_interactive" : "reopened", {{"durationMs", milliseconds() - showStart_}, {"bookmarks", snapshot_.document.bookmarks.size()}, {"dpi", dpiScale_ * 96},
+            {"rendererGeneration", rendererGeneration_}, {"iconsDrawn", paintedIcons_}, {"readyIconsDrawn", paintedReadyIcons_}, {"bitmapCount", bitmaps_.size()}}); firstShow_ = false;
     }
 }
 void Launcher::animate(int direction) {
@@ -304,25 +325,52 @@ void Launcher::animate(int direction) {
     if (theme_.reducedMotion) { animationStart_ = 0; corners_.suppress(systemPanel_); invalidate(); return; }
     SetTimer(window_, timerAnimation, 16, nullptr); invalidate();
 }
-void Launcher::receivedImage(std::string url, std::shared_ptr<Pixels> pixels) {
-    if (!visible_ || !pixels) return; ensureRenderer();
+void Launcher::receivedImage(Images::Result result) {
+    if (!visible_) return;
+    diagnostics_.event("image_completed", {{"key", hash(result.url)}, {"request", result.request}, {"generation", result.generation},
+        {"source", result.source == Images::Source::cache ? "cache" : (result.source == Images::Source::network ? "network" : "wallpaper")},
+        {"loaded", result.pixels != nullptr}, {"deferred", result.deferred}, {"queueMs", result.queueMs}, {"loadMs", result.loadMs}, {"totalMs", result.totalMs}});
+    if (result.deferred) { requestedIcons_.erase(result.url); SetTimer(controller_, timerImageRetry, 100, nullptr); return; }
+    if (!result.pixels) return;
+    auto& pixels = result.pixels; auto& url = result.url; ensureRenderer();
     ComPtr<ID2D1Bitmap> bitmap;
     if (FAILED(target_->CreateBitmap(D2D1::SizeU(pixels->width, pixels->height), pixels->bgra.data(), pixels->width * 4, D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &bitmap))) return;
     if (url == "__wallpaper__") { if (!theme_.highContrast) wallpaper_ = bitmap; }
     else {
-        if (bitmaps_.size() >= 128) { std::set<std::string> needed; for (const auto& item : visibleItems_) if (auto b = snapshot_.document.bookmark(item.id)) needed.insert(b->url);
-            for (auto it = bitmaps_.begin(); it != bitmaps_.end();) { if (!needed.contains(it->first)) { requestedIcons_.erase(it->first); it = bitmaps_.erase(it); } else ++it; } }
-        bitmaps_[url] = bitmap;
+        bitmaps_[url] = {bitmap, ++bitmapUse_};
+        if (bitmaps_.size() > 128) {
+            std::set<std::string> needed; for (auto b : visibleBookmarks()) needed.insert(b->url);
+            auto oldest = std::min_element(bitmaps_.begin(), bitmaps_.end(), [&](const auto& a, const auto& b) {
+                bool aNeeded = needed.contains(a.first), bNeeded = needed.contains(b.first);
+                return aNeeded != bNeeded ? !aNeeded : a.second.used < b.second.used;
+            });
+            requestedIcons_.erase(oldest->first); bitmaps_.erase(oldest);
+        }
     }
     invalidate();
 }
+std::vector<const Bookmark*> Launcher::visibleBookmarks() const {
+    std::vector<const Bookmark*> bookmarks; std::set<std::string> seen;
+    auto add = [&](const Bookmark* b) { if (b && seen.insert(b->url).second) bookmarks.push_back(b); };
+    for (const auto& item : visibleItems_) {
+        if (item.folder) { auto contents = snapshot_.document.items(item.id); for (size_t i = 0; i < std::min<size_t>(4, contents.size()); ++i) add(snapshot_.document.bookmark(contents[i].id)); }
+        else add(snapshot_.document.bookmark(item.id));
+    }
+    return bookmarks;
+}
 void Launcher::requestImages() {
     if (!images_ || !visible_) return;
-    auto request = [&](const Bookmark* b) { if (b && !requestedIcons_.contains(b->url)) { requestedIcons_.insert(b->url); images_->request(b->url, static_cast<UINT>(72 * dpiScale_)); } };
-    for (const auto& item : visibleItems_) {
-        if (item.folder) { auto contents = snapshot_.document.items(item.id); for (size_t i = 0; i < std::min<size_t>(4, contents.size()); ++i) request(snapshot_.document.bookmark(contents[i].id)); }
-        else request(snapshot_.document.bookmark(item.id));
+    UINT size = std::clamp(static_cast<UINT>(72 * dpiScale_), 32u, 192u);
+    for (auto b : visibleBookmarks()) {
+        auto bitmap = bitmaps_.find(b->url);
+        if (bitmap != bitmaps_.end() && bitmap->second.bitmap->GetPixelSize().width >= size) continue;
+        if (requestedIcons_.contains(b->url)) continue;
+        if (auto request = images_->request(b->url, size)) requestedIcons_[b->url] = request;
+        else SetTimer(controller_, timerImageRetry, 100, nullptr);
     }
+}
+void Launcher::requestWallpaper() {
+    if (visible_ && !theme_.highContrast) if (auto request = images_->wallpaper(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST))) requestedIcons_["__wallpaper__"] = request;
 }
 void Launcher::loadInitial() {
     busy_ = true;
@@ -411,7 +459,11 @@ void Launcher::menu(const std::string& id, POINT point) {
     if (action == 1) activate(id);
     else if (action == 2 && b) { copyText(window_, wide(b->url)); notify("网址已复制。"); }
     else if (action == 3) { if (b) edit(id); else if (g) rename(id); }
-    else if (action == 4 && b) { images_->request(b->url, static_cast<UINT>(72 * dpiScale_), true); notify(options_.offline ? "离线模式下保留当前图标。" : "正在后台刷新图标，失败时保留原图标。"); }
+    else if (action == 4 && b) {
+        if (auto request = images_->request(b->url, static_cast<UINT>(72 * dpiScale_), true)) {
+            requestedIcons_[b->url] = request; notify(options_.offline ? "离线模式下保留当前图标。" : "正在后台刷新图标，失败时保留原图标。");
+        } else notify("图标队列繁忙，请稍后刷新。");
+    }
     else if (action == 5) { view_.organizing = true; animate(); }
     else if (action == 6) remove(id);
     else if (locations.contains(action)) mutate([=](Document& data) { data.move(id, locations.at(action)); });
@@ -588,9 +640,9 @@ LRESULT Launcher::message(UINT message, WPARAM w, LPARAM l) {
     case WM_SYSCOMMAND: if ((w & 0xfff0) == SC_MINIMIZE || (w & 0xfff0) == SC_CLOSE) { hide(); return 0; } break;
     case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && visible_ && !systemPanel_ && !inMenu_ && !sameProcess(reinterpret_cast<HWND>(l))) hide(); return 0;
     case WM_SIZE: if (w == SIZE_MINIMIZED) hide(); else updateLayout(); return 0;
-    case WM_DPICHANGED: dpiScale_ = HIWORD(w) / 96.0f; releaseRenderer(); updateTheme(); place(false); return 0;
-    case WM_DISPLAYCHANGE: if (visible_) { place(false); images_->wallpaper(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST)); } return 0;
-    case WM_SETTINGCHANGE: case WM_THEMECHANGED: updateTheme(); if (visible_) { place(false); images_->wallpaper(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST)); } return 0;
+    case WM_DPICHANGED: dpiScale_ = HIWORD(w) / 96.0f; releaseRenderer(); updateTheme(); place(false); requestWallpaper(); return 0;
+    case WM_DISPLAYCHANGE: if (visible_) { place(false); requestWallpaper(); } return 0;
+    case WM_SETTINGCHANGE: case WM_THEMECHANGED: updateTheme(); if (visible_) { place(false); requestWallpaper(); } return 0;
     case WM_COMMAND:
         if (LOWORD(w) == 10 && HIWORD(w) == EN_CHANGE) { view_.query = utf8(windowText(search_)); view_.searchPage = 0; view_.selection = -1; view_.organizing = false; updateLayout(); }
         else if (LOWORD(w) == 11) settings(); else if (LOWORD(w) == 12) edit(); else panelCommand(LOWORD(w), HIWORD(w)); return 0;

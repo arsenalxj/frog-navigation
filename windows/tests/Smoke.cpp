@@ -1,13 +1,21 @@
 #include "platform/Integration.h"
 #include "platform/Images.h"
+#include "core/State.h"
 #include <UIAutomation.h>
 #include <iostream>
+#include <set>
 #include <windowsx.h>
 
 using namespace frog;
 namespace {
 void expect(bool value, const char* message) { require(value, message); }
 bool waitFor(const std::function<bool()>& condition, int timeout = 5000) { double started = milliseconds(); do { if (condition()) return true; Sleep(25); } while (milliseconds() - started < timeout); return false; }
+std::vector<Json> events(const fs::path& path, const char* name) {
+    std::vector<Json> out; if (!fs::exists(path)) return out;
+    std::ifstream input(path);
+    for (std::string line; std::getline(input, line);) { auto event = Json::parse(line, nullptr, false); if (!event.is_discarded() && event.value("event", "") == name) out.push_back(std::move(event)); }
+    return out;
+}
 HWND findWindow(DWORD pid, const wchar_t* name) {
     struct Context { DWORD pid; const wchar_t* name; HWND found{}; } context{pid, name};
     EnumWindows([](HWND window, LPARAM ref) -> BOOL { auto& c = *reinterpret_cast<Context*>(ref); DWORD pid{}; GetWindowThreadProcessId(window, &pid); wchar_t cls[80]{}; GetClassNameW(window, cls, 80); if (pid == c.pid && _wcsicmp(cls, c.name) == 0) { c.found = window; return FALSE; } return TRUE; }, reinterpret_cast<LPARAM>(&context));
@@ -16,6 +24,13 @@ HWND findWindow(DWORD pid, const wchar_t* name) {
 PROCESS_INFORMATION launch(const std::wstring& command) {
     auto writable = command; STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE; PROCESS_INFORMATION process{};
     expect(CreateProcessW(nullptr, writable.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process), "无法启动测试进程"); CloseHandle(process.hThread); return process;
+}
+void foreground(HWND window) {
+    auto thread = GetCurrentThreadId(), active = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    bool attached = active != thread && AttachThreadInput(thread, active, TRUE);
+    SetForegroundWindow(window);
+    if (attached) AttachThreadInput(thread, active, FALSE);
+    expect(waitFor([&] { return IsWindowVisible(window) && GetForegroundWindow() == window; }), "测试窗口未取得前台焦点");
 }
 std::wstring remoteText(HWND window) {
     std::wstring value(static_cast<size_t>(SendMessageW(window, WM_GETTEXTLENGTH, 0, 0)) + 1, 0);
@@ -54,7 +69,7 @@ int wmain(int argc, wchar_t** argv) {
         expect(argc >= 2, "缺少应用路径"); fs::path artifacts = argc >= 3 ? fs::path(argv[2]) : temp / L"artifacts"; fs::create_directories(artifacts);
         ScopeExit evidence{[&] { if (fs::exists(temp / "diagnostics.jsonl")) fs::copy_file(temp / "diagnostics.jsonl", artifacts / "application.jsonl", fs::copy_options::overwrite_existing); }};
         Document data; auto group = data.addGroup("界面验收文件夹"); data.upsert("", "文件夹内中文", "example.com", group);
-        for (int i = 0; i < 60; ++i) data.upsert("", "书签 " + std::to_string(i), "https://example.com/" + std::to_string(i), {});
+        for (int i = 0; i < 180; ++i) data.upsert("", "书签 " + std::to_string(i), "https://example.com/" + std::to_string(i), {});
         atomicWrite(temp / "bookmarks.json", data.encode()); auto before = readFile(temp / "bookmarks.json");
         auto command = L"\"" + std::wstring(argv[1]) + L"\" --offline --data-directory \"" + temp.wstring() + L"\" --diagnostics \"" + (temp / "diagnostics.jsonl").wstring() + L"\"";
         auto process = launch(command + L" --background"); Handle processHandle(process.hProcess);
@@ -62,14 +77,67 @@ int wmain(int argc, wchar_t** argv) {
         HWND controller{}; expect(waitFor([&] { controller = findWindow(process.dwProcessId, L"FrogController"); return controller != nullptr && fs::exists(temp / "diagnostics.jsonl"); }), "后台进程未就绪");
         Sleep(150); expect(findWindow(process.dwProcessId, L"FrogLauncher") == nullptr, "后台启动不应创建主界面");
         std::cout << "PASS background-lazy-window\n";
+        auto log = temp / "diagnostics.jsonl";
+        expect(waitFor([&] { return !events(log, "process_started").empty(); }), "缺少缓存目录诊断事件");
+        auto cache = fs::path(wide(events(log, "process_started").front().at("iconCacheDirectory").get<std::string>()));
+        expect(fs::weakly_canonical(cache.parent_path()) == fs::weakly_canonical(fs::temp_directory_path()) && cache.filename().wstring().starts_with(L"Frog-session-"), "图标缓存不属于本次隔离实例");
+        ScopeExit removeCache{[&] { std::error_code ec; fs::remove_all(cache, ec); }};
+        fs::create_directories(cache);
+        Pixels icon{72, 72, std::vector<unsigned char>(72 * 72 * 4, 255)};
+        for (size_t i = 0; i < icon.bgra.size(); i += 4) { icon.bgra[i] = 80; icon.bgra[i + 1] = 180; icon.bgra[i + 2] = 20; }
+        auto png = encodePng(icon);
+        for (const auto& bookmark : data.bookmarks) atomicWrite(cache / wide(hash(bookmark.url) + ".png"), png);
         auto second = launch(command); Handle secondHandle(second.hProcess);
         ScopeExit stopSecond{[&] { if (WaitForSingleObject(secondHandle, 0) != WAIT_OBJECT_0) { TerminateProcess(secondHandle, 1); WaitForSingleObject(secondHandle, 3000); } }};
         expect(WaitForSingleObject(secondHandle, 5000) == WAIT_OBJECT_0, "第二实例未退出"); DWORD secondCode{}; GetExitCodeProcess(secondHandle, &secondCode); expect(secondCode == 0, "第二实例转交失败");
         HWND window{}; expect(waitFor([&] { window = findWindow(process.dwProcessId, L"FrogLauncher"); return window && IsWindowVisible(window); }), "未唤起现有窗口");
-        AllowSetForegroundWindow(process.dwProcessId); SetForegroundWindow(window);
+        AllowSetForegroundWindow(process.dwProcessId); foreground(window);
         expect(waitFor([&] { return readFile(temp / "diagnostics.jsonl").find("first_interactive") != std::string::npos; }), "首次绘制未完成");
         RECT actual{}; GetWindowRect(window, &actual); auto expected = monitorWorkArea(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)); expect(EqualRect(&actual, &expected), "窗口未铺满工作区");
         std::cout << "PASS single-instance-work-area-first-paint\n";
+        auto firstFrame = events(log, "first_interactive").back(); auto rendererGeneration = firstFrame.at("rendererGeneration").get<uint64_t>();
+        auto loadedIcons = [&] { size_t count = 0; for (const auto& event : events(log, "image_completed")) if (event.value("source", "") == "cache" && event.value("loaded", false)) ++count; return count; };
+        ViewState view; RECT client{}; GetClientRect(window, &client); float dpi = GetDpiForWindow(window) / 96.0f; view.layout = {client.right / dpi, client.bottom / dpi};
+        size_t expectedLoads = view.visibleItems(data).size();
+        expect(waitFor([&] { return loadedIcons() >= expectedLoads; }), "首页缓存图标未加载完成");
+        auto reopen = [&](size_t iconCount, bool sameRenderer) {
+            auto before = events(log, "reopened").size();
+            SendMessageW(window, WM_CLOSE, 0, 0); expect(!IsWindowVisible(window), "收起失败");
+            // 等待窗口管理器完成收起后的前台切换，再模拟用户重新展开。
+            Sleep(150);
+            AllowSetForegroundWindow(process.dwProcessId); SendMessageW(controller, wmActivate, 0, 0); foreground(window);
+            expect(waitFor([&] { return events(log, "reopened").size() > before; }), "重新展开没有首帧事件");
+            const auto frame = events(log, "reopened").back();
+            expect(frame.at("iconsDrawn") == iconCount && frame.at("readyIconsDrawn") == iconCount, "再次展开首帧未直接使用所有已缓存图标");
+            expect(frame.at("bitmapCount").get<size_t>() <= 128, "内存位图缓存超过上限");
+            if (sameRenderer) expect(frame.at("rendererGeneration") == rendererGeneration, "正常收起重建了绘制表面");
+        };
+        for (int i = 0; i < 3; ++i) reopen(expectedLoads, true);
+        expect(loadedIcons() == expectedLoads, "重新展开重复读取了已有位图的磁盘缓存");
+        std::cout << "PASS cached-icons-first-frame-without-reload\n";
+        for (int page = 1; page < view.pageCount(data); ++page) {
+            view.turn(data, 1); auto count = view.visibleItems(data).size(); expectedLoads += count;
+            PostMessageW(window, WM_KEYDOWN, VK_NEXT, 0);
+            expect(waitFor([&] { return loadedIcons() >= expectedLoads; }), "翻页缓存图标未加载完成");
+            reopen(count, true);
+        }
+        expect(events(log, "reopened").back().at("bitmapCount") == 128, "缓存上限测试没有覆盖淘汰场景");
+        const auto beforeReturn = events(log, "image_completed").size();
+        for (int page = view.page(); page > 0; --page) PostMessageW(window, WM_KEYDOWN, VK_PRIOR, 0);
+        view.rootPage = 0; std::set<std::string> initialKeys;
+        for (const auto& item : view.visibleItems(data)) { auto bookmark = data.bookmark(item.id); if (!bookmark && item.folder) bookmark = data.bookmark(data.items(item.id).front().id); if (bookmark) initialKeys.insert(hash(bookmark->url)); }
+        expect(waitFor([&] { auto recent = events(log, "image_completed"); auto missing = initialKeys; for (size_t i = beforeReturn; i < recent.size(); ++i) if (recent[i].value("loaded", false)) missing.erase(recent[i].value("key", "")); return missing.empty(); }), "被淘汰的首页图标未重新加载");
+        reopen(initialKeys.size(), true);
+        std::cout << "PASS bitmap-cache-limit-and-evicted-icons-reload\n";
+        auto beforeRebuild = loadedIcons();
+        RECT suggested{}; GetWindowRect(window, &suggested); DWORD_PTR dpiResult{};
+        auto dpiSent = SendMessageTimeoutW(window, WM_DPICHANGED, MAKEWPARAM(static_cast<UINT>(dpi * 96), static_cast<UINT>(dpi * 96)),
+            reinterpret_cast<LPARAM>(&suggested), SMTO_ABORTIFHUNG, 5000, &dpiResult);
+        require(dpiSent != 0, winError("无法发送 DPI 重建消息"));
+        expect(waitFor([&] { return loadedIcons() >= beforeRebuild + initialKeys.size(); }), "绘制资源失效后未恢复缓存图标");
+        reopen(initialKeys.size(), false);
+        expect(events(log, "reopened").back().at("rendererGeneration").get<uint64_t>() > rendererGeneration, "资源重建测试未创建新绘制表面");
+        std::cout << "PASS recreated-renderer-restores-cached-icons\n";
         Sleep(280); capture(window, artifacts / "launchpad.png");
         ComPtr<IUIAutomation> automation; check(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation)), "UIA 初始化失败");
         ComPtr<IUIAutomationElement> root; check(automation->ElementFromHandle(window, &root), "UIA 无法读取根窗口");

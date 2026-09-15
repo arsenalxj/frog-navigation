@@ -113,7 +113,7 @@ int wmain(int argc, wchar_t** argv) {
         auto rendered = decodeImage(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50"><path fill="blue" d="M0 0H50V50H0Z"/></svg>)", 64);
         atomicWrite(temp.path / wide(hash(url) + ".png"), encodePng(*rendered));
         std::promise<std::shared_ptr<Pixels>> loaded;
-        Images images(temp.path, true, [&](uint64_t, std::string, std::shared_ptr<Pixels> pixels) { loaded.set_value(pixels); });
+        Images images(temp.path, true, [&](Images::Result result) { loaded.set_value(std::move(result.pixels)); });
         images.resume(); images.request(url, 64);
         auto result = loaded.get_future();
         expect(result.wait_for(std::chrono::seconds(3)) == std::future_status::ready);
@@ -144,7 +144,7 @@ int wmain(int argc, wchar_t** argv) {
             expect(decoded->bgra[pixel + 1] == 255 && decoded->bgra[pixel + 2] == 0 && decoded->bgra[pixel + 3] == 255);
         }
     });
-    test("offline-icon-cache", [] { Temporary temp; auto url = std::string("https://example.com"); Pixels image{32, 32, std::vector<unsigned char>(32 * 32 * 4, 255)}; atomicWrite(temp.path / wide(hash(url) + ".png"), encodePng(image)); std::promise<bool> loaded; Images images(temp.path, true, [&](uint64_t, std::string, std::shared_ptr<Pixels> pixels) { loaded.set_value(pixels != nullptr); }); images.resume(); images.request(url, 64); auto result = loaded.get_future(); expect(result.wait_for(std::chrono::seconds(3)) == std::future_status::ready && result.get()); });
+    test("offline-icon-cache", [] { Temporary temp; auto url = std::string("https://example.com"); Pixels image{32, 32, std::vector<unsigned char>(32 * 32 * 4, 255)}; atomicWrite(temp.path / wide(hash(url) + ".png"), encodePng(image)); std::promise<bool> loaded; Images images(temp.path, true, [&](Images::Result result) { loaded.set_value(result.pixels != nullptr); }); images.resume(); images.request(url, 64); auto result = loaded.get_future(); expect(result.wait_for(std::chrono::seconds(3)) == std::future_status::ready && result.get()); });
     test("global-hotkey-conflict-keeps-old", [] { auto a = CreateWindowExW(0, L"STATIC", L"FrogTestA", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr); auto b = CreateWindowExW(0, L"STATIC", L"FrogTestB", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr); ScopeExit close{[&] { DestroyWindow(a); DestroyWindow(b); }}; GlobalHotKey first, second; HotKey key{true, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F23}; first.set(a, key); rejects([&] { second.set(b, key); }); first.set(a, {false}); second.set(b, key); });
     std::cout << passed << " passed, " << failed << " failed\n"; return failed ? 1 : 0;
 }
