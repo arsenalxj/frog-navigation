@@ -133,6 +133,7 @@ void Launcher::hide() {
     KillTimer(window_, timerAnimation); KillTimer(window_, timerLongPress); KillTimer(window_, timerDrag); KillTimer(window_, timerStatus);
     KillTimer(controller_, timerImageRetry);
     animationStart_ = 0; view_.organizing = false; ShowWindow(window_, SW_HIDE); images_->pause(); requestedIcons_.clear();
+    SetWindowTextW(search_, L"");
     corners_.suppress(systemPanel_); savePage(); diagnostics_.event("hidden");
 }
 void Launcher::quit() {
