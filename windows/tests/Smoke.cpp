@@ -100,6 +100,17 @@ int wmain(int argc, wchar_t** argv) {
         ViewState view; RECT client{}; GetClientRect(window, &client); float dpi = GetDpiForWindow(window) / 96.0f; view.layout = {client.right / dpi, client.bottom / dpi};
         size_t expectedLoads = view.visibleItems(data).size();
         expect(waitFor([&] { return loadedIcons() >= expectedLoads; }), "首页缓存图标未加载完成");
+        ComPtr<IUIAutomation> automation; check(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation)), "UIA 初始化失败");
+        ComPtr<IUIAutomationElement> root; check(automation->ElementFromHandle(window, &root), "UIA 无法读取根窗口");
+        auto search = GetDlgItem(window, 10);
+        SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"没有匹配的搜索"));
+        expect(named(automation.Get(), root.Get(), L"界面验收文件夹") == nullptr, "搜索未过滤启动台条目");
+        SendMessageW(window, WM_CLOSE, 0, 0);
+        expect(!IsWindowVisible(window) && remoteText(search).empty(), "收起保留了搜索输入");
+        Sleep(150); SendMessageW(controller, wmActivate, 0, 0);
+        expect(IsWindowVisible(window) && remoteText(search).empty(), "重新展开保留了搜索输入");
+        expect(named(automation.Get(), root.Get(), L"界面验收文件夹") != nullptr, "清空输入后仍保留搜索结果");
+        std::cout << "PASS hide-clears-search-and-restores-items\n";
         auto reopen = [&](size_t iconCount, bool sameRenderer) {
             auto before = events(log, "reopened").size();
             SendMessageW(window, WM_CLOSE, 0, 0); expect(!IsWindowVisible(window), "收起失败");
@@ -139,8 +150,6 @@ int wmain(int argc, wchar_t** argv) {
         expect(events(log, "reopened").back().at("rendererGeneration").get<uint64_t>() > rendererGeneration, "资源重建测试未创建新绘制表面");
         std::cout << "PASS recreated-renderer-restores-cached-icons\n";
         Sleep(280); capture(window, artifacts / "launchpad.png");
-        ComPtr<IUIAutomation> automation; check(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation)), "UIA 初始化失败");
-        ComPtr<IUIAutomationElement> root; check(automation->ElementFromHandle(window, &root), "UIA 无法读取根窗口");
         VARIANT name{}; name.vt = VT_BSTR; name.bstrVal = SysAllocString(L"界面验收文件夹"); ComPtr<IUIAutomationCondition> condition; automation->CreatePropertyCondition(UIA_NamePropertyId, name, &condition); VariantClear(&name);
         ComPtr<IUIAutomationElement> folder; root->FindFirst(TreeScope_Descendants, condition.Get(), &folder); expect(folder != nullptr, "自绘文件夹未暴露给 UIA");
         ComPtr<IUIAutomationInvokePattern> invoke; check(folder->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&invoke)), "UIA 不支持打开文件夹"); check(invoke->Invoke(), "UIA 打开失败"); Sleep(120);
@@ -181,7 +190,9 @@ int wmain(int argc, wchar_t** argv) {
         expect(waitFor([&] { return Document::decode(readFile(temp / "bookmarks.json")).groups.size() == 2; }), "停留创建文件夹未保存");
         auto merged = Document::decode(readFile(temp / "bookmarks.json")); expect(merged.bookmark(data.bookmarks[2].id)->groupId == merged.bookmark(data.bookmarks[3].id)->groupId, "成组后归属错误");
         std::cout << "PASS native-drag-hover-merge\n";
+        SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"https://example.com"));
         SendMessageW(window, WM_SYSCOMMAND, SC_MINIMIZE, 0); expect(!IsWindowVisible(window), "任务栏最小化未转为收起");
+        expect(remoteText(search).empty(), "最小化收起保留了搜索输入");
         auto finalData = readFile(temp / "bookmarks.json"); PostMessageW(controller, wmActivate, 0, 0); expect(waitFor([&] { return IsWindowVisible(window); }), "收起后无法唤起");
         expect(readFile(temp / "bookmarks.json") == finalData && before != finalData, "生命周期修改了数据");
         SendMessageW(window, WM_COMMAND, 11, 0); Sleep(80); capture(window, artifacts / "settings.png");
