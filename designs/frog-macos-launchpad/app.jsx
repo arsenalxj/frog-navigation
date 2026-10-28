@@ -754,7 +754,7 @@ function App() {
                       }}></button>
                     </div>
                     <div className="set-row">
-                      <span className="set-note">登录 macOS 后静默驻留，首次点击程序坞图标才创建主界面。</span>
+                      <span className="set-note">登录 macOS 后静默驻留，不显示程序坞图标，可通过快捷键或屏幕触角展开。</span>
                     </div>
                   </div>
                   <div className="set-group">

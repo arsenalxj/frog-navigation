@@ -151,7 +151,7 @@ def launch(args):
             save_json(run_path, run)
             print(f"冷启动可操作观测值：{run['cold_launch_observed_wall_ms']:.2f} ms；"
                   f"应用内部：{first['elapsed_ms']:.2f} ms", flush=True)
-            print("请在界面确认可操作，然后收起；用 hidden 子命令测隐藏资源，再点击 Dock 展开。")
+            print("请在界面确认可操作，然后收起；用 hidden 子命令测隐藏资源，再按 Option-Space 展开。")
             return
         if process.poll() is not None:
             raise RuntimeError(f"进程提前退出（{process.returncode}）；日志：{log_path}")
@@ -260,7 +260,7 @@ def report(args):
         "可操作事件在数据载入、窗口可见后的主线程下一轮布局完成时输出；"
         "不代表展开动画结束，也不代替人工/CUA点击验收。"
         "冷启动为新进程启动，未清理系统文件缓存；再次展开从应用收到展开请求起算，"
-        "不包含Dock事件传递时间。缺少测量项以null记录。")
+        "不包含系统唤起事件传递时间。缺少测量项以null记录。")
     save_json(path, run)
     print(json.dumps(run, ensure_ascii=False, indent=2))
 

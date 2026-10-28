@@ -112,4 +112,4 @@ else
   registration_status=$?
   echo "安装已完成，但图标注册刷新失败（退出码 ${registration_status}）：$destination" >&2
 fi
-echo '可在 Finder 打开青蛙导航，再右键 Dock 图标 → 选项 → 在程序坞中保留。'
+echo '青蛙导航不显示程序坞图标；可在 Finder 打开，或在后台驻留时使用已启用的快捷键、屏幕触角展开。'

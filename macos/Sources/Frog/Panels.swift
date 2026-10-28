@@ -363,7 +363,7 @@ struct SettingsPanel: View {
                     Toggle("登录时启动", isOn: Binding(get: { login.enabled || login.requiresApproval }, set: { login.setEnabled($0) }))
                         .toggleStyle(.switch).labelsHidden().controlSize(.small).disabled(login.changing)
                 }
-                Text(login.requiresApproval ? "等待系统批准。请在登录项设置中允许青蛙导航。" : "登录后静默驻留，可通过程序坞图标、快捷键或屏幕触角展开。")
+                Text(login.requiresApproval ? "等待系统批准。请在登录项设置中允许青蛙导航。" : "登录后静默驻留，不显示程序坞图标，可通过快捷键或屏幕触角展开。")
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if login.requiresApproval { Button("打开系统登录项设置") { login.openSettings() }.controlSize(.small) }
                 if let error = login.error {

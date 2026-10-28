@@ -12,7 +12,7 @@ struct FrogApplication {
         let application = NSApplication.shared
         let delegate = ApplicationDelegate()
         application.delegate = delegate
-        application.setActivationPolicy(.regular)
+        application.setActivationPolicy(.accessory)
         withExtendedLifetime(delegate) { application.run() }
     }
 }

@@ -35,3 +35,22 @@ identifier "cn.arsenalxj.Frog" and certificate leaf = H"05a2a276a653099a94d2d9e5
 用户已将旧辅助功能条目移除并重新添加首个固定签名版本；重启后，应用实际权限检查中的辅助功能、Finder 自动化、键盘控制与监听均通过。随后退出并安装构建号 2，全程未再次操作系统权限；新进程的权限检查仍通过，相关提示均未出现。安装包与构建产物文件清单一致，书签文件 SHA-256 未变，更新后的 TCC 日志未出现旧身份要求不匹配错误。当前正式安装为固定证书签名的 1.0.0（2）。
 
 TextEdit 标准打开面板的补充自动化验证中，Control-G 未观察到目录变化，尚未形成真实跨应用快跳成功证据；不能把权限保持通过等同于完整交互验收通过。本次未改动快跳实现。证据保存在 `build/signing-validation/verification.json` 与 `build/signing-validation/tcc-after-update.log`。
+
+## 隐藏程序坞图标
+
+2026-10-28 改为 AppKit `.accessory` 激活策略，并在应用包声明 `LSUIElement = true`；设置、安装提示和使用说明同步移除程序坞唤起入口。
+
+- `scripts/build-release.sh` 成功；固定证书签名、arm64 架构及严格签名校验通过，产物为 `build/青蛙导航.app`。
+- 直接运行 Release 可执行文件，以 `--data-directory` 和 `--offline` 隔离验证。手动启动时实际激活策略为 `.accessory`，一个启动台窗口可见且获得激活，截图已检查；切换到 Finder 后窗口收起，进程继续运行且激活策略不变。
+- 以 `--background` 启动同一产物，实际激活策略仍为 `.accessory`，没有可见窗口且未激活；生成包内 `LSUIElement` 为 `true`。隔离进程均已退出，未替换正式应用或修改程序坞配置。
+- 隔离验证时本机原有正式版仍在运行，且程序坞已固定该应用。Finder 重新打开按 Bundle ID 路由到了原有正式版，未能据此验证隔离进程重开；定向重开事件缺少自动化授权，未请求授权。
+- 未验证真实登录、快捷键、屏幕触角和键盘交互；本次未运行单元测试。证据为 `build/dockless-qa-5l74fkbc/verification.json`、运行日志和 `manual-launch.png`。
+
+### 正式安装与重新打开
+
+2026-10-28 经用户授权，正常退出旧版后通过 `scripts/install.sh` 替换 `/Applications/青蛙导航.app`。安装及签名检查通过，旧包已归档并验证，回滚文件为 `build/install-backup/Frog-previous.zip`。
+
+- 从正式安装路径启动成功，实际激活策略为 `.accessory`，包内 `LSUIElement = true`；真实界面显示原有书签，截图确认程序坞中没有青蛙导航图标。
+- 切换到 Finder 后启动台收起；再通过系统打开正式应用，复用同一进程及原窗口，激活策略保持不变。
+- 安装前后书签文件 SHA-256 一致，应用偏好没有变化。未手动修改 Dock 设置；安装启动后查询，原有固定项已不在 Dock 配置中，无需额外移除。
+- 证据为 `build/dockless-qa-5l74fkbc/installed-verification.json` 和 `installed-launch.png`。新版保持运行；未验证真实登录、快捷键和屏幕触角。
