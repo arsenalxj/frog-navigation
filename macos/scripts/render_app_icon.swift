@@ -24,25 +24,8 @@ func png(_ source: CGImage, size: Int) throws -> Data {
     return data as Data
 }
 
-func writeICO(_ source: CGImage, to url: URL) throws {
-    let sizes = [16, 24, 32, 48, 64, 128, 256]
-    let frames = try sizes.map { try png(source, size: $0) }
-    var data = Data()
-    func word(_ value: UInt16) { var value = value.littleEndian; withUnsafeBytes(of: &value) { data.append(contentsOf: $0) } }
-    func dword(_ value: UInt32) { var value = value.littleEndian; withUnsafeBytes(of: &value) { data.append(contentsOf: $0) } }
-    word(0); word(1); word(UInt16(sizes.count))
-    var offset = 6 + sizes.count * 16
-    for (size, frame) in zip(sizes, frames) {
-        let side = UInt8(size == 256 ? 0 : size)
-        data.append(contentsOf: [side, side, 0, 0]); word(1); word(32)
-        dword(UInt32(frame.count)); dword(UInt32(offset)); offset += frame.count
-    }
-    for frame in frames { data.append(frame) }
-    try data.write(to: url, options: .atomic)
-}
-
-guard CommandLine.arguments.count == 4 || CommandLine.arguments.count == 5 else {
-    fputs("用法：render_app_icon.swift <源PNG> <Resources目录> <预览目录> [Windows ICO路径]\n", stderr)
+guard CommandLine.arguments.count == 4 else {
+    fputs("用法：render_app_icon.swift <源PNG> <Resources目录> <预览目录>\n", stderr)
     exit(1)
 }
 do {
@@ -73,9 +56,6 @@ do {
     ]
     let json = try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     try json.write(to: icon.appendingPathComponent("icon.json"), options: .atomic)
-    if CommandLine.arguments.count == 5 {
-        try writeICO(source, to: URL(fileURLWithPath: CommandLine.arguments[4]))
-    }
     print("已从原图生成 1024 × 1024 青蛙图标及 Icon Composer 文档。")
 } catch {
     fputs("图标生成失败：\(error.localizedDescription)\n", stderr)

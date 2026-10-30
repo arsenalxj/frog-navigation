@@ -8,7 +8,7 @@
 - `Tests/FrogCoreTests/`：持久化和数据行为测试；临时测试数据在测试结束时删除。
 - `Tests/FrogIconsTests/`：图标解析、请求限制与缓存测试，使用隔离临时目录。
 - `Tests/FrogTests/`：界面状态与系统集成逻辑测试；快捷键注册使用替身，本机偏好使用隔离存储，测试后清理。
-- `Resources/`：应用信息、图标和打包资源；`AppIcon.icon/` 使用共享 `../assets/frog-navigation.png` 生成满幅 PNG 图层，保留原图背景和完整构图，由系统生成圆角。`scripts/render_app_icon.swift` 缩放原图并生成平台资源，`scripts/generate-icon.sh` 编译 `.icon` 与 ICNS；预览只进入 `build/`。
+- `Resources/`：应用信息、图标和打包资源；`AppIcon.icon/` 使用共享 `../assets/frog-navigation.png` 生成满幅 PNG 图层，保留原图背景和完整构图，由系统生成圆角。`scripts/render_app_icon.swift` 只缩放原图生成 macOS 资源，`scripts/generate-icon.sh` 编译 `.icon` 与 ICNS；Windows 的 `AppIcon.ico` 由 `windows/scripts/generate-icon.ps1` 独占生成。预览只进入 `build/`。
 - `scripts/`：构建、安装和独立验收工具；Shell 文件采用短横线命名，Python/Swift 工具采用下划线命名。测量数据和临时图标集只进入忽略的 `build/`，可随时清理。
 - `Frog.xcodeproj/`：原生工程；`Package.swift` 提供命令行构建与测试。
 - `.build/` 与 `build/` 保存编译、测试和打包产物并纳入忽略规则；其中 `build/install-backup/` 保存可恢复的旧版 ZIP，按 `README.md` 的保留与清理规则管理。清理整个 `build/` 前先检查回滚包，其余可重新生成的产物可按需清理；这些目录不存用户书签数据。

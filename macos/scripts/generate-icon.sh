@@ -13,7 +13,7 @@ fi
 
 stage_dir="$(mktemp -d "$macos_dir/build/.icon-generation.XXXXXX")"
 trap 'rm -rf -- "$stage_dir"' EXIT
-/usr/bin/xcrun swift "$macos_dir/scripts/render_app_icon.swift" "$macos_dir/../assets/frog-navigation.png" "$macos_dir/Resources" "$preview_dir" "$macos_dir/../windows/resources/AppIcon.ico"
+/usr/bin/xcrun swift "$macos_dir/scripts/render_app_icon.swift" "$macos_dir/../assets/frog-navigation.png" "$macos_dir/Resources" "$preview_dir"
 for size in 128 1024; do
   "$ictool" "$macos_dir/Resources/AppIcon.icon" \
     --export-image --output-file "$preview_dir/macos-default-${size}.png" \

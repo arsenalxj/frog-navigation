@@ -43,7 +43,7 @@ open /Applications/青蛙导航.app
 
 也可以直接打开 `Frog.xcodeproj`，选择工程内共享的 `Frog` scheme，运行或构建应用。Xcode 同时可能列出本地 Swift Package 派生的同名可执行 scheme；交付 `.app` 时使用工程的 scheme。命令行脚本已经指定该工程与共享 scheme。`Package.swift` 中的可执行 target 用于 Swift 命令行编译；登录项及 Launch Services 集成需要完整 `.app`。
 
-应用图标源为仓库 `assets/frog-navigation.png`，保留用户提供的完整青蛙与白色背景。`scripts/render_app_icon.swift` 将原图缩放为 1024 × 1024 PNG 图层和 Windows 多尺寸 ICO；`scripts/generate-icon.sh` 将 `Resources/AppIcon.icon` 编译为 `Assets.car` 和兼容旧版 macOS 的 `AppIcon.icns`。每次 Release 构建自动重建；系统渲染预览位于 `build/icon-preview/`。关于页复用应用图标。
+应用图标源为仓库 `assets/frog-navigation.png`，保留用户提供的完整青蛙与白色背景。`scripts/render_app_icon.swift` 将原图缩放为 1024 × 1024 PNG 图层；`scripts/generate-icon.sh` 将 `Resources/AppIcon.icon` 编译为 `Assets.car` 和兼容旧版 macOS 的 `AppIcon.icns`。Windows 的 `windows/resources/AppIcon.ico` 只由 `windows/scripts/generate-icon.ps1` 生成，macOS 构建不写该文件。每次 Release 构建自动重建；系统渲染预览位于 `build/icon-preview/`。关于页复用应用图标。
 
 ## 使用
 
