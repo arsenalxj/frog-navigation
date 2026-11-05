@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "青蛙导航 双栏预览": {
+      "versions": [
+        {
+          "path": "青蛙导航 双栏预览.html",
+          "createdAt": "2026-11-05T00:00:00+08:00",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-05T00:00:00+08:00",
+  "updatedAt": "2026-11-05T00:00:00+08:00"
+}

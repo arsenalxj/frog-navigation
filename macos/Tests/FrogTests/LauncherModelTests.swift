@@ -64,7 +64,7 @@ final class LauncherModelTests: XCTestCase {
         model.submitInput()
     }
 
-    func testCachedRootAndFolderRowsHaveFixedFolderAndAddEntrances() async throws {
+    func testFolderRowsExpandInPlaceWithStableRootOrder() async throws {
         let group = BookmarkGroup(name: "工作", order: 30)
         let root = Bookmark(title: "根书签", url: "https://www.root.example:8443/path?query=value", order: 0)
         let child = Bookmark(title: "目录书签", url: "https://child.example", groupId: group.id)
@@ -75,15 +75,33 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.items[1].url, root.url)
         XCTAssertEqual(model.visibleRowCount, 19)
         model.activateSelection()
-        XCTAssertEqual(model.folderID, group.id)
-        XCTAssertEqual(model.items.map(\.kind), [.add, .bookmark])
+        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
+        XCTAssertEqual(model.items.map(\.kind), [.folder, .bookmark, .bookmark])
         XCTAssertEqual(model.items[1].id, child.id)
-        XCTAssertTrue(model.showBreadcrumb)
-        XCTAssertEqual(model.visibleRowCount, 18)
+        XCTAssertEqual(model.items[1].depth, 1)
+        XCTAssertEqual(model.items[2].id, root.id)
+        XCTAssertEqual(model.items[2].depth, 0)
+        XCTAssertEqual(model.selectedIndex, 0)
+        XCTAssertEqual(model.visibleRowCount, 19)
+        model.toggleExpanded(group.id)
+        XCTAssertFalse(model.expandedGroupIDs.contains(group.id))
+        XCTAssertEqual(model.items.map(\.id), [group.id, root.id])
+    }
+
+    func testTabTogglesSelectedFolderAndIsConsumedElsewhere() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let root = Bookmark(title: "根书签", url: "https://root.example", order: 0)
+        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [root]))
+        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
+        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
+        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
+        XCTAssertFalse(model.expandedGroupIDs.contains(group.id))
+        model.selectItem(at: 1)
+        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
         XCTAssertEqual(model.selectedIndex, 1)
     }
 
-    func testEmptyRootHasNoVirtualRowAndFolderExposesAddAction() async throws {
+    func testEmptyRootHasNoVirtualRowAndExpandedFolderStaysEmpty() async throws {
         let empty = try await makeModel()
         XCTAssertTrue(empty.items.isEmpty)
         empty.activateSelection()
@@ -93,11 +111,13 @@ final class LauncherModelTests: XCTestCase {
         let group = BookmarkGroup(name: "空文件夹")
         let model = try await makeModel(BookmarkDocument(groups: [group]))
         model.activateSelection()
-        model.activateSelection()
+        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
+        XCTAssertEqual(model.items.map(\.kind), [.folder])
+        model.addBookmark()
         model.updateInput("folder.example")
         model.submitInput()
         model.submitInput()
-        XCTAssertEqual(model.prompt?.choices[model.prompt?.selectedChoice ?? 0].id, group.id)
+        try choose(group.id, in: model)
         model.submitInput()
         try await settle { !model.busy }
         XCTAssertEqual(try saved(model).bookmarks.first?.groupId, group.id)
@@ -334,7 +354,7 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.items.first { $0.id == bookmark.id }?.groupID, group.id)
         XCTAssertEqual(model.items.first { $0.id == root.id }?.groupName, "根目录")
         XCTAssertEqual(model.items.first { $0.id == root.id }?.detail, "needle.example")
-        XCTAssertFalse(model.items.contains { $0.kind == .add })
+        XCTAssertTrue(model.items.allSatisfy { $0.kind == .bookmark })
         model.updateInput("完全不存在")
         XCTAssertTrue(model.items.isEmpty)
         XCTAssertEqual(model.selectedIndex, 0)
@@ -402,7 +422,7 @@ final class LauncherModelTests: XCTestCase {
         _ = model.handleKey(try key(125, modifiers: .shift), isTextEditing: false)
         try await settle { !model.busy }
         XCTAssertEqual(model.items.first?.id, group.id)
-        XCTAssertFalse(model.items.contains { $0.kind == .add })
+        XCTAssertEqual(model.items.filter { $0.kind == .bookmark }.count, 3)
         XCTAssertEqual(try saved(model).bookmarks(in: nil).map(\.id), [document.bookmarks[1].id, document.bookmarks[0].id, document.bookmarks[2].id])
         XCTAssertEqual(model.items[model.selectedIndex].id, document.bookmarks[0].id)
         try select(group.id, in: model)
@@ -426,6 +446,8 @@ final class LauncherModelTests: XCTestCase {
         model.dropBookmark(sourceID: source, targetID: group.id, before: false, merge: false)
         try await settle { !model.busy }
         XCTAssertEqual(try saved(model).bookmarks.first { $0.id == source }?.groupId, group.id)
+        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
+        XCTAssertTrue(model.items.contains { $0.id == source && $0.depth == 1 })
         model.dropBookmark(sourceID: source, targetID: nil, before: false, merge: false)
         try await settle { !model.busy }
         XCTAssertNil(try saved(model).bookmarks.first { $0.id == source }?.groupId)
@@ -619,26 +641,49 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.inputText, "set finder authorize")
     }
 
-    func testSearchFromFolderAddsToRootAndEscapeUnwindsOneStateAtATime() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let model = try await makeModel(BookmarkDocument(groups: [group]))
+    func testEscapeCollapsesParentThenAllThenDismisses() async throws {
+        let a = BookmarkGroup(name: "A", order: 1)
+        let b = BookmarkGroup(name: "B", order: 2)
+        let child = Bookmark(title: "子书签", url: "https://child.example", groupId: a.id)
+        let model = try await makeModel(BookmarkDocument(groups: [a, b], bookmarks: [child]))
         model.activateSelection()
-        model.startSearch()
-        model.updateInput("全局搜索")
-        addThroughTitle(model)
-        XCTAssertEqual(model.prompt?.choices[model.prompt?.selectedChoice ?? 0].id, "__root__")
+        XCTAssertTrue(model.expandedGroupIDs.contains(a.id))
+        model.moveCursor(1)
+        XCTAssertEqual(model.items[model.selectedIndex].id, child.id)
         model.escape()
-        XCTAssertEqual(model.query, "全局搜索")
-        XCTAssertEqual(model.folderID, group.id)
+        XCTAssertFalse(model.expandedGroupIDs.contains(a.id))
+        XCTAssertEqual(model.items[model.selectedIndex].id, a.id)
+        model.activateSelection()
+        model.toggleAllExpanded()
+        XCTAssertEqual(model.expandedGroupIDs, Set([a.id, b.id]))
         model.escape()
-        XCTAssertEqual(model.query, "")
-        XCTAssertEqual(model.folderID, group.id)
+        XCTAssertEqual(model.expandedGroupIDs, Set([b.id]))
         model.escape()
-        XCTAssertNil(model.folderID)
+        XCTAssertTrue(model.expandedGroupIDs.isEmpty)
         var hidden = false
         model.dismissWindow = { hidden = true }
         model.escape()
         XCTAssertTrue(hidden)
+    }
+
+    func testExpandedFoldersPersistAndPruneDeletedGroups() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let suite = "frog.tests.expanded.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let directory = try directory()
+        try BookmarkDocument(groups: [group]).encoded().write(to: directory.appendingPathComponent("bookmarks.json"))
+        let store = BookmarkStore(directoryOverride: directory, persistDirectory: false)
+        await store.load()
+        let model = LauncherModel(store: store, isolated: false, defaults: defaults)
+        XCTAssertTrue(model.expandedGroupIDs.isEmpty)
+        model.toggleExpanded(group.id)
+        XCTAssertEqual(defaults.stringArray(forKey: LauncherModel.expandedDefaultsKey), [group.id])
+        let reopened = LauncherModel(store: store, isolated: false, defaults: defaults)
+        XCTAssertEqual(reopened.expandedGroupIDs, Set([group.id]))
+        reopened.expandedGroupIDs.insert("missing")
+        reopened.rebuildItems()
+        XCTAssertEqual(reopened.expandedGroupIDs, Set([group.id]))
     }
 
     func testIsolatedLoginCommandsReportControllerErrorsWithoutClaimingSystemActions() async throws {
@@ -720,27 +765,66 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.modeLabel, "SEARCH")
     }
 
-    func testBareCommaOpensSettingsAndF1TogglesAtlasBackToList() async throws {
+    func testExpandedStateIsNotPrunedBeforeStoreLoads() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let suite = "frog.tests.launch-order.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set([group.id], forKey: LauncherModel.expandedDefaultsKey)
+        let directory = try directory()
+        try BookmarkDocument(groups: [group]).encoded().write(to: directory.appendingPathComponent("bookmarks.json"))
+        let store = BookmarkStore(directoryOverride: directory, persistDirectory: false)
+        let model = LauncherModel(store: store, isolated: false, defaults: defaults)
+        XCTAssertEqual(model.expandedGroupIDs, Set([group.id]))
+        await store.load()
+        try await settle { model.items.contains { $0.kind == .folder } }
+        XCTAssertEqual(model.expandedGroupIDs, Set([group.id]))
+        XCTAssertEqual(defaults.stringArray(forKey: LauncherModel.expandedDefaultsKey), [group.id])
+    }
+
+    func testTabInBufferDoesNotToggleFolders() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let model = try await makeModel(BookmarkDocument(groups: [group]))
+        model.openBuffer(.help)
+        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .help)
+        XCTAssertTrue(model.expandedGroupIDs.isEmpty)
+    }
+
+    func testGroupCommandClearsBufferAndSearchThenExpands() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let model = try await makeModel(BookmarkDocument(groups: [group]))
+        model.startSearch()
+        model.updateInput("工作")
+        model.openBuffer(.help)
+        model.runCommand("group 工作")
+        XCTAssertNil(model.buffer)
+        XCTAssertEqual(model.query, "")
+        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
+        XCTAssertEqual(model.items[model.selectedIndex].id, group.id)
+    }
+
+    func testFunctionKeyF1NoLongerOpensBuffer() async throws {
+        let model = try await makeModel(fixture(count: 3))
+        XCTAssertFalse(model.handleKey(try key(122), isTextEditing: false))
+        XCTAssertNil(model.buffer)
+    }
+
+    func testBareCommaOpensSettingsAndCommandCommaOpensSettings() async throws {
         let model = try await makeModel(fixture(count: 3))
         model.selectItem(at: 1)
         XCTAssertTrue(model.handleKey(try key(43, ","), isTextEditing: false))
         XCTAssertEqual(model.buffer, .settings)
         model.escape()
-        XCTAssertTrue(model.handleKey(try key(122), isTextEditing: false))
-        XCTAssertEqual(model.buffer, .atlas)
-        model.selectItem(at: 5)
-        XCTAssertEqual(model.atlasIndex, 5)
-        XCTAssertTrue(model.handleKey(try key(122), isTextEditing: false))
         XCTAssertNil(model.buffer)
-        XCTAssertEqual(model.atlasIndex, 5)
         XCTAssertEqual(model.selectedIndex, 1)
         XCTAssertTrue(model.handleKey(try key(43, ",", modifiers: .command), isTextEditing: false))
         XCTAssertEqual(model.buffer, .settings)
     }
 
-    func testOpenRejectsIntegerOverflowAndBuffersKeepSearchAndHelpShortcuts() async throws {
+    func testOpenRejectsArgumentsAndBuffersKeepSearchAndHelpShortcuts() async throws {
         let model = try await makeModel(fixture(count: 3))
-        model.runCommand("open -9223372036854775808")
+        model.runCommand("open 3")
         XCTAssertEqual(model.logs.last?.level, .error)
         XCTAssertEqual(model.selectedIndex, 0)
         model.openBuffer(.log)
@@ -752,7 +836,7 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.buffer, .help)
     }
 
-    func testCommandHistoryCompletionAndAtlasUseActualCommandCatalog() async throws {
+    func testCommandHistoryCompletionUsesActualCommandCatalog() async throws {
         let model = try await makeModel()
         model.startCommand()
         model.updateInput("hel")
@@ -767,25 +851,10 @@ final class LauncherModelTests: XCTestCase {
         _ = model.handleKey(try key(125), isTextEditing: true)
         XCTAssertEqual(model.inputText, "未提交命令")
         model.escape()
-        model.openBuffer(.atlas)
-        let add = try XCTUnwrap(model.commands.firstIndex { $0.name == "add" })
-        model.selectItem(at: add)
-        model.activateSelection()
-        XCTAssertEqual(model.prompt?.command, "add")
-        XCTAssertFalse(model.commands.contains { ["refresh", "favicons"].contains($0.name) })
-        model.escape()
-        model.openBuffer(.atlas)
-        model.selectItem(at: try XCTUnwrap(model.commands.firstIndex { $0.name == "set" }))
-        model.activateSelection()
+        XCTAssertFalse(model.commands.contains { ["refresh", "favicons", "atlas"].contains($0.name) })
+        model.runCommand("set")
         XCTAssertEqual(model.buffer, .settings)
         XCTAssertNil(model.inputKind)
-        model.escape()
-        model.openBuffer(.atlas)
-        model.selectItem(at: try XCTUnwrap(model.commands.firstIndex { $0.name == "group" }))
-        model.activateSelection()
-        XCTAssertNil(model.buffer)
-        XCTAssertEqual(model.inputKind, .command)
-        XCTAssertEqual(model.inputText, "group ")
     }
 
     func testClearOnlyRemovesLogsAndQuitInvokesApplicationCallback() async throws {

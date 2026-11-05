@@ -12,7 +12,6 @@ extension LauncherView {
         case .help: hint = "Esc 返回 · : 输入命令"
         case .log: hint = ":clear 清空 · Esc 返回"
         case .job: hint = "Esc 返回 · :log 查看日志"
-        case .atlas: hint = "\(model.commands.count) 个命令 · j/k 移动 · Enter 打开 · F1/Esc 关闭"
         }
         D.text(hint, 1400, 36, size: 10.5, color: D.muted, align: .right)
         D.rule(40, 50, 1360)
@@ -21,7 +20,6 @@ extension LauncherView {
         case .help: drawHelp()
         case .log: drawLog()
         case .job: drawJob()
-        case .atlas: drawAtlas()
         }
     }
 
@@ -85,7 +83,7 @@ extension LauncherView {
             ("j/k · ↑/↓", "移动"), ("g/G", "首项 / 末项"), ("PageUp/Down", "滚动"), ("Enter", "打开 / 确认"),
             ("/", "搜索"), (":", "命令"), ("a · ⌘N", "添加书签"), ("n", "新建文件夹"), ("e", "编辑书签"),
             ("r", "重命名文件夹"), ("m", "移动书签"), ("D", "删除确认"), ("C", "复制链接"), ("o", "整理"),
-            ("Shift+↑/↓", "书签排序"), ("Tab/⇧Tab", "候选 / 字段"), ("⌘,", "设置"), ("F1", "命令地图"), ("?", "帮助"), ("Esc", "取消 / 返回")
+            ("Shift+↑/↓", "书签排序"), ("Tab", "展开 / 折叠"), ("z", "全部展开"), ("⌘,", "设置"), ("?", "帮助"), ("Esc", "取消 / 返回")
         ]
         for (index, shortcut) in shortcuts.enumerated() {
             let y = 172 + CGFloat(index) * 20
@@ -162,43 +160,6 @@ extension LauncherView {
         }
         D.text("命令与真实执行结果同时写入 :log。", 40, 728, size: 10, color: D.muted)
         bufferPosition(start: start, end: end, count: job.lines.count)
-    }
-
-    private func drawAtlas() {
-        typealias D = TerminalDrawing
-        let start = min(max(0, model.bufferOffset), model.commands.count)
-        let end = min(model.commands.count, start + 18)
-        for column in 0..<3 {
-            let x = 60 + CGFloat(column) * 450
-            D.text("COMMANDS \(start + column * 6 + 1)–\(min(end, start + (column + 1) * 6))", x, 103, size: 10, color: D.ink2, bold: true)
-            D.rule(x, 118, 400)
-        }
-        for index in start..<end {
-            let position = index - start
-            let column = position / 6
-            let row = position % 6
-            let x = 60 + CGFloat(column) * 450
-            let y = 132 + CGFloat(row) * 62
-            let command = model.commands[index]
-            let selected = index == model.atlasIndex
-            if selected { D.rect(NSRect(x: x, y: y, width: 400, height: 54), D.ink) }
-            D.text(String(format: "%02d", index + 1), x + 4, y + 13, size: 9.5, color: selected ? D.yellow : D.muted)
-            D.text(":" + command.name, x + 34, y + 13, size: 11.5, color: selected ? D.paper : D.ink, bold: true, maxWidth: 278)
-            if selected { D.text("当前", x + 394, y + 13, size: 9, color: D.mint, align: .right) }
-            D.text(command.summary, x + 34, y + 34, size: 11, color: selected ? D.mint : D.muted, maxWidth: 358)
-            hit(NSRect(x: x, y: y, width: 400, height: 54), "\(command.usage)，\(command.summary)。\(command.detail)", .atlas(index), selected: selected)
-        }
-        D.rect(NSRect(x: 960, y: 550, width: 400, height: 104), D.surface)
-        D.text("当前项：墨黑底 + 鸦黄序号", 976, 574, size: 10.5, color: D.ink2)
-        D.text("点击或 Enter 执行；需要参数时", 976, 596, size: 10.5, color: D.muted)
-        D.text("在底部命令行继续输入。Esc 返回。", 976, 616, size: 10.5, color: D.muted)
-        D.text("滚轮 / PageUp / PageDown 查看其他命令。", 976, 636, size: 10.5, color: D.muted)
-        if model.commands.indices.contains(model.atlasIndex) {
-            let command = model.commands[model.atlasIndex]
-            D.text(command.usage, 64, 574, size: 13, color: D.teal, bold: true, maxWidth: 850)
-            D.text(command.detail.isEmpty ? command.summary : command.detail, 64, 604, size: 12, color: D.ink2, maxWidth: 850)
-        }
-        bufferPosition(start: start, end: end, count: model.commands.count)
     }
 
     private func bufferPosition(start: Int, end: Int, count: Int) {

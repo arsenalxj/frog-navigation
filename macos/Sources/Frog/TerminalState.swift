@@ -1,9 +1,9 @@
 import Foundation
 
 // 原生绘制与命令模型共用的值类型；界面只消费真实状态，不包含原型场景模拟。
-enum TerminalBuffer: String { case settings, help, log, job, atlas }
+enum TerminalBuffer: String { case settings, help, log, job }
 enum TerminalInputKind { case command, search, prompt }
-enum TerminalItemKind { case bookmark, folder, add }
+enum TerminalItemKind { case bookmark, folder }
 enum TerminalLevel { case normal, muted, info, success, warning, error, command }
 enum TerminalJobStatus { case running, success, failure }
 
@@ -15,6 +15,8 @@ struct TerminalItem: Identifiable, Equatable {
     var url: String? = nil
     var groupID: String? = nil
     var groupName: String? = nil
+    var depth: Int = 0
+    var expanded: Bool = false
 }
 
 struct TerminalChoice: Identifiable, Equatable {

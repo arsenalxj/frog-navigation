@@ -16,11 +16,10 @@ final class LauncherModel: ObservableObject {
     @Published var items: [TerminalItem] = []
     @Published var selectedIndex = 0
     @Published var scrollIndex = 0
-    @Published var folderID: String?
+    @Published var expandedGroupIDs: Set<String> = []
     @Published var query = ""
     @Published var buffer: TerminalBuffer?
     @Published var bufferOffset = 0
-    @Published var atlasIndex = 0
     @Published var inputKind: TerminalInputKind?
     @Published var inputText = ""
     @Published var inputRevision = 0
@@ -36,9 +35,7 @@ final class LauncherModel: ObservableObject {
     var dismissWindow: (() -> Void)?
     var terminateApplication: (() -> Void)?
     var document: BookmarkDocument { store.document }
-    var folderName: String { document.groups.first { $0.id == folderID }?.name ?? "根目录" }
-    var showBreadcrumb: Bool { folderID != nil && query.isEmpty && buffer == nil }
-    var visibleRowCount: Int { showBreadcrumb ? 18 : 19 }
+    var visibleRowCount: Int { 19 }
     var isTextInputActive: Bool {
         inputKind == .command || inputKind == .search || (inputKind == .prompt && prompt?.acceptsText == true)
     }
@@ -76,6 +73,8 @@ final class LauncherModel: ObservableObject {
     var lastIssue: String?
     var loadedWasLogged = false
     var lastDirectory: URL
+    private let defaults: UserDefaults?
+    static let expandedDefaultsKey = "frog.expandedGroupIDs"
     private let clockFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
@@ -83,13 +82,18 @@ final class LauncherModel: ObservableObject {
     }()
 
     init(store: BookmarkStore, isolated: Bool = false, hotKey: GlobalHotKeyController? = nil,
-         hotCorner: HotCornerController? = nil, finderJump: FinderJumpController? = nil) {
+         hotCorner: HotCornerController? = nil, finderJump: FinderJumpController? = nil,
+         defaults: UserDefaults? = nil) {
         self.store = store
         self.isolated = isolated
         self.login = LoginItemController(isolated: isolated)
         self.hotKey = hotKey
         self.hotCorner = hotCorner
         self.finderJump = finderJump
+        self.defaults = defaults ?? (isolated ? nil : .standard)
+        if let saved = self.defaults?.stringArray(forKey: Self.expandedDefaultsKey) {
+            expandedGroupIDs = Set(saved)
+        }
         self.lastDirectory = store.directory
         store.objectWillChange.receive(on: DispatchQueue.main).sink { [weak self] in
             self?.storageChanged()
@@ -121,7 +125,6 @@ final class LauncherModel: ObservableObject {
         busy = operationActive || store.isBusy
         if lastDirectory != store.directory {
             lastDirectory = store.directory
-            folderID = nil
             selectedIndex = 0
             scrollIndex = 0
         }
@@ -138,34 +141,75 @@ final class LauncherModel: ObservableObject {
 
     func rebuildItems(selecting id: String? = nil) {
         let previousID = id ?? (items.indices.contains(selectedIndex) ? items[selectedIndex].id : nil)
-        if let folderID, !document.groups.contains(where: { $0.id == folderID }) { self.folderID = nil }
+        if store.isLoaded {
+            let valid = Set(document.groups.map(\.id))
+            if !expandedGroupIDs.isSubset(of: valid) {
+                expandedGroupIDs = expandedGroupIDs.intersection(valid)
+                persistExpanded()
+            }
+        }
         let groups = document.groups.sorted { $0.order == $1.order ? $0.id < $1.id : $0.order < $1.order }
         let names = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0.name) })
         let counts = Dictionary(grouping: document.bookmarks.compactMap(\.groupId), by: { $0 }).mapValues(\.count)
-        func item(_ bookmark: Bookmark) -> TerminalItem {
+        func item(_ bookmark: Bookmark, depth: Int = 0) -> TerminalItem {
             let components = URLComponents(string: bookmark.url)
             let host = components?.host ?? ""
             let hostname = host.lowercased().hasPrefix("www.") ? String(host.dropFirst(4)) : host
             let detail = components?.port.map { "\(hostname):\($0)" } ?? hostname
             return TerminalItem(id: bookmark.id, kind: .bookmark, title: bookmark.title, detail: detail,
                                 url: bookmark.url, groupID: bookmark.groupId,
-                                groupName: bookmark.groupId.flatMap { names[$0] } ?? "根目录")
+                                groupName: bookmark.groupId.flatMap { names[$0] } ?? "根目录",
+                                depth: depth)
         }
         if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            items = document.search(query).map(item)
+            items = document.search(query).map { item($0) }
         } else {
             var next: [TerminalItem] = []
-            if folderID == nil {
-                next = groups.map { TerminalItem(id: $0.id, kind: .folder, title: $0.name,
-                                                detail: "\(counts[$0.id] ?? 0) 项") }
-            } else {
-                next.append(TerminalItem(id: "__add__", kind: .add, title: "添加书签", detail: ":add"))
+            for group in groups {
+                let expanded = expandedGroupIDs.contains(group.id)
+                next.append(TerminalItem(id: group.id, kind: .folder, title: group.name,
+                                         detail: "\(counts[group.id] ?? 0) 项", expanded: expanded))
+                if expanded {
+                    next.append(contentsOf: document.bookmarks(in: group.id).map { item($0, depth: 1) })
+                }
             }
-            next.append(contentsOf: document.bookmarks(in: folderID).map(item))
+            next.append(contentsOf: document.bookmarks(in: nil).map { item($0) })
             items = next
         }
         if let previousID, let index = items.firstIndex(where: { $0.id == previousID }) { selectedIndex = index }
         clampSelection()
+    }
+
+    func persistExpanded() {
+        defaults?.set(expandedGroupIDs.sorted(), forKey: Self.expandedDefaultsKey)
+    }
+
+    func selectedGroupID() -> String? {
+        guard items.indices.contains(selectedIndex) else { return nil }
+        let item = items[selectedIndex]
+        return item.kind == .folder ? item.id : item.groupID
+    }
+
+    func toggleExpanded(_ id: String) {
+        guard prompt == nil, !busy, document.groups.contains(where: { $0.id == id }) else { return }
+        let expanding = !expandedGroupIDs.contains(id)
+        if expanding { expandedGroupIDs.insert(id) } else { expandedGroupIDs.remove(id) }
+        persistExpanded()
+        rebuildItems(selecting: id)
+        let count = document.bookmarks(in: id).count
+        appendLog("\(expanding ? "展开" : "折叠")文件夹 \(document.groups.first { $0.id == id }?.name ?? "")（\(count) 项）", .info)
+    }
+
+    func toggleAllExpanded() {
+        guard prompt == nil, !busy, buffer == nil,
+              query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let ids = Set(document.groups.map(\.id))
+        let allOpen = !ids.isEmpty && ids.isSubset(of: expandedGroupIDs)
+        let keep = selectedGroupID()
+        expandedGroupIDs = allOpen ? [] : ids
+        persistExpanded()
+        rebuildItems(selecting: keep)
+        appendLog(allOpen ? "折叠全部文件夹" : "展开全部 \(ids.count) 个文件夹", .info)
     }
 
     func clampSelection() {
@@ -233,17 +277,10 @@ final class LauncherModel: ObservableObject {
         self.buffer = buffer
         bufferOffset = 0
         inputKind = nil
-        if buffer == .atlas { atlasIndex = 0 }
     }
 
     func selectItem(at index: Int) {
         guard prompt == nil, !busy else { return }
-        if buffer == .atlas {
-            guard commands.indices.contains(index) else { return }
-            atlasIndex = index
-            inputKind = nil
-            return
-        }
         guard buffer == nil, items.indices.contains(index) else { return }
         selectedIndex = index
         inputKind = nil
@@ -252,48 +289,16 @@ final class LauncherModel: ObservableObject {
 
     func activateSelection() {
         guard prompt == nil, !busy else { return }
-        if buffer == .atlas {
-            guard commands.indices.contains(atlasIndex) else { return }
-            let command = commands[atlasIndex]
-            buffer = nil
-            if command.name == "group" {
-                setInput(.command, text: command.name + " ")
-            } else { runCommand(command.name) }
-            return
-        }
         guard buffer == nil else { return }
         if items.isEmpty, !query.isEmpty { openSearch(); return }
         guard items.indices.contains(selectedIndex) else { return }
         let item = items[selectedIndex]
         switch item.kind {
-        case .add: addBookmark()
-        case .folder: enterFolder(item.id)
+        case .folder: toggleExpanded(item.id)
         case .bookmark:
             guard let value = item.url, let url = URL(string: value) else { return }
             openURL(url, label: item.title)
         }
-    }
-
-    func enterFolder(_ id: String) {
-        guard document.groups.contains(where: { $0.id == id }) else { appendLog("文件夹已不存在。", .error); return }
-        folderID = id
-        query = ""
-        buffer = nil
-        inputKind = nil
-        selectedIndex = document.bookmarks(in: id).isEmpty ? 0 : 1
-        scrollIndex = 0
-        rebuildItems(selecting: "__reset__")
-    }
-
-    func closeFolder() {
-        guard prompt == nil, !busy else { return }
-        let id = folderID
-        folderID = nil
-        query = ""
-        inputKind = nil
-        selectedIndex = 0
-        scrollIndex = 0
-        rebuildItems(selecting: id)
     }
 
     func scroll(rows: Int) {
@@ -302,7 +307,7 @@ final class LauncherModel: ObservableObject {
             let count: Int
             switch buffer {
             case .settings: count = settingsRows.count
-            case .help, .atlas: count = commands.count
+            case .help: count = commands.count
             case .log: count = logs.count
             case .job: count = job?.lines.count ?? 0
             }
@@ -312,12 +317,8 @@ final class LauncherModel: ObservableObject {
             case .help: capacity = 20
             case .log: capacity = 32
             case .job: capacity = 25
-            case .atlas: capacity = 18
             }
             bufferOffset = min(max(0, bufferOffset + rows), max(0, count - capacity))
-            if buffer == .atlas {
-                atlasIndex = min(max(atlasIndex, bufferOffset), min(max(0, count - 1), bufferOffset + capacity - 1))
-            }
         } else {
             scrollIndex = min(max(0, scrollIndex + rows), max(0, items.count - visibleRowCount))
             selectedIndex = min(max(selectedIndex, scrollIndex), min(max(0, items.count - 1), scrollIndex + visibleRowCount - 1))
@@ -335,7 +336,19 @@ final class LauncherModel: ObservableObject {
         } else if buffer != nil { buffer = nil; bufferOffset = 0 }
         else if isOrganizing { isOrganizing = false }
         else if !query.isEmpty { query = ""; selectedIndex = 0; scrollIndex = 0; rebuildItems(selecting: "__reset__") }
-        else if folderID != nil { closeFolder() }
+        else if let groupID = selectedGroupID(), expandedGroupIDs.contains(groupID) {
+            expandedGroupIDs.remove(groupID)
+            persistExpanded()
+            rebuildItems(selecting: groupID)
+            appendLog("折叠文件夹 \(document.groups.first { $0.id == groupID }?.name ?? "")", .info)
+        }
+        else if !expandedGroupIDs.isEmpty {
+            let keep = selectedGroupID()
+            expandedGroupIDs = []
+            persistExpanded()
+            rebuildItems(selecting: keep)
+            appendLog("折叠全部文件夹", .info)
+        }
         else { dismissWindow?() }
     }
 
@@ -406,7 +419,7 @@ final class LauncherModel: ObservableObject {
     func reorderSelection(_ direction: Int) {
         guard isOrganizing, query.isEmpty, !busy,
               items.indices.contains(selectedIndex), items[selectedIndex].kind == .bookmark else { return }
-        let bookmarks = document.bookmarks(in: folderID)
+        let bookmarks = document.bookmarks(in: items[selectedIndex].groupID)
         let id = items[selectedIndex].id
         guard let from = bookmarks.firstIndex(where: { $0.id == id }), bookmarks.indices.contains(from + direction) else { return }
         dropBookmark(sourceID: id, targetID: bookmarks[from + direction].id, before: direction < 0, merge: false)
@@ -415,8 +428,12 @@ final class LauncherModel: ObservableObject {
     func dropBookmark(sourceID: String, targetID: String?, before: Bool, merge: Bool) {
         guard isOrganizing, query.isEmpty, prompt == nil, !busy,
               document.bookmarks.contains(where: { $0.id == sourceID }), sourceID != targetID else { return }
-        if targetID == "__add__" { return }
-        let currentFolder = folderID
+        let destinationGroupID: String? = targetID.map { id in
+            document.groups.contains(where: { $0.id == id })
+                ? id
+                : document.bookmarks.first(where: { $0.id == id })?.groupId
+        } ?? nil
+        if let destinationGroupID { expandedGroupIDs.insert(destinationGroupID) }
         mutate("已移动书签", closePrompt: false) { document in
             guard let source = document.bookmarks.first(where: { $0.id == sourceID }) else {
                 throw BookmarkError.invalidData("书签已不存在。")
@@ -442,7 +459,7 @@ final class LauncherModel: ObservableObject {
                 try document.moveBookmark(id: sourceID, to: nil)
                 return sourceID
             }
-            guard let target = document.bookmarks.first(where: { $0.id == targetID }), target.groupId == currentFolder else {
+            guard let target = document.bookmarks.first(where: { $0.id == targetID }) else {
                 throw BookmarkError.invalidData("拖拽目标已改变，请重试。")
             }
             let peers = document.bookmarks(in: target.groupId).filter { $0.id != sourceID }
@@ -464,6 +481,7 @@ final class LauncherModel: ObservableObject {
                 try await store.apply { selection = try mutation(&$0) }
                 if closePrompt { finishPrompt() }
                 rebuildItems(selecting: selection)
+                persistExpanded()
                 appendLog(message, .success)
             } catch {
                 prompt?.error = error.localizedDescription
@@ -537,13 +555,14 @@ final class LauncherModel: ObservableObject {
             }
         }
         if isTextEditing { return false }
-        if text == ":" { startCommand(); return true }
-        if buffer == .settings { return true }
-        if event.keyCode == 122 {
-            if buffer == .atlas { buffer = nil; bufferOffset = 0 }
-            else { openBuffer(.atlas) }
+        if event.keyCode == 48 {
+            if buffer == nil, items.indices.contains(selectedIndex), items[selectedIndex].kind == .folder {
+                toggleExpanded(items[selectedIndex].id)
+            }
             return true
         }
+        if text == ":" { startCommand(); return true }
+        if buffer == .settings { return true }
         if let buffer {
             if text == "/" { self.buffer = nil; bufferOffset = 0; startSearch(); return true }
             if text == "?" { openBuffer(.help); return true }
@@ -552,13 +571,13 @@ final class LauncherModel: ObservableObject {
             case 126: moveBuffer(-1); return true
             case 121: scroll(rows: 18); return true
             case 116: scroll(rows: -18); return true
-            case 36, 76: if buffer == .atlas { activateSelection() }; return true
+            case 36, 76: return true
             default: break
             }
             if text == "j" { moveBuffer(1); return true }
             if text == "k" { moveBuffer(-1); return true }
-            if text == "g" { bufferOffset = 0; atlasIndex = 0; return true }
-            if text == "G" { scroll(rows: Int.max / 2); if buffer == .atlas { atlasIndex = max(0, commands.count - 1) }; return true }
+            if text == "g" { bufferOffset = 0; return true }
+            if text == "G" { scroll(rows: Int.max / 2); return true }
             return false
         }
         if isOrganizing && modifiers.contains(.shift) && ([125, 126].contains(event.keyCode) || ["J", "K"].contains(text)) {
@@ -587,6 +606,7 @@ final class LauncherModel: ObservableObject {
         case "D": requestDeleteSelection()
         case "C": copySelection()
         case "o": toggleOrganizing()
+        case "z": toggleAllExpanded()
         case "?": openBuffer(.help)
         case ",": openSettings()
         default: return false
@@ -600,10 +620,6 @@ final class LauncherModel: ObservableObject {
     }
 
     func moveBuffer(_ delta: Int) {
-        if buffer == .atlas {
-            atlasIndex = min(max(0, atlasIndex + delta), max(0, commands.count - 1))
-            if atlasIndex < bufferOffset { bufferOffset = atlasIndex }
-            if atlasIndex >= bufferOffset + 18 { bufferOffset = atlasIndex - 17 }
-        } else { scroll(rows: delta) }
+        scroll(rows: delta)
     }
 }

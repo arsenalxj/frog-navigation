@@ -25,7 +25,7 @@ extension LauncherModel {
     func addBookmark() {
         guard prompt == nil, !busy else { return }
         buffer = nil
-        draft = Draft(location: query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (folderID ?? "__root__") : "__root__")
+        draft = Draft()
         beginPrompt("add", total: 3, field: "url", value: "", hint: "Enter 下一步 · Esc 取消")
     }
 
@@ -67,7 +67,6 @@ extension LauncherModel {
     func requestDeleteSelection() {
         guard prompt == nil, !busy, items.indices.contains(selectedIndex) else { return }
         let item = items[selectedIndex]
-        guard item.kind != .add else { appendLog("添加入口不可删除。", .warning); return }
         if item.kind == .folder && document.bookmarks.contains(where: { $0.groupId == item.id }) {
             appendLog("请先移出或删除文件夹内的书签，再删除文件夹。", .error)
             return
@@ -396,7 +395,7 @@ extension LauncherModel {
                     message = "数据目录：\(store.directory.path)；旧目录数据保留。"
                 }
                 finishPrompt()
-                if command != "backup" { folderID = nil; query = ""; selectedIndex = 0; scrollIndex = 0; isOrganizing = false }
+                if command != "backup" { query = ""; selectedIndex = 0; scrollIndex = 0; isOrganizing = false }
                 rebuildItems()
                 job?.status = .success
                 job?.lines.append(makeEntry(message, .success))

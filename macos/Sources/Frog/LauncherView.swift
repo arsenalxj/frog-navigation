@@ -24,7 +24,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     var regions: [Region] = []
 
     enum Action {
-        case item(Int), delete(Int), root, choice(Int), complete(String), draft(String), atlas(Int), command(String), input
+        case item(Int), delete(Int), toggle(Int), choice(Int), complete(String), draft(String), command(String), input
     }
     struct Region {
         let rect: NSRect
@@ -43,7 +43,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     override var acceptsFirstResponder: Bool { true }
     var scale: CGFloat { max(0.01, min(bounds.width / 1440, bounds.height / 900)) }
     var canvasOrigin: NSPoint { NSPoint(x: (bounds.width - 1440 * scale) / 2, y: (bounds.height - 900 * scale) / 2) }
-    var rowsTop: CGFloat { model.showBreadcrumb ? 64 : 24 }
+    var rowsTop: CGFloat { 24 }
 
     init(model: LauncherModel) {
         self.model = model
@@ -215,11 +215,15 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         switch action {
         case let .item(index):
             model.selectItem(at: index)
-            if model.items.indices.contains(index), model.items[index].kind == .add || activate { model.activateSelection() }
+            if activate { model.activateSelection() }
         case let .delete(index):
             model.selectItem(at: index)
             model.requestDeleteSelection()
-        case .root: model.closeFolder()
+        case let .toggle(index):
+            guard model.items.indices.contains(index), model.items[index].kind == .folder else { break }
+            let id = model.items[index].id
+            model.selectItem(at: index)
+            model.toggleExpanded(id)
         case let .choice(index): model.choosePromptOption(at: index)
         case let .complete(command):
             model.updateInput(command + " ")
@@ -229,9 +233,6 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             model.startCommand()
             model.updateInput(command + " ")
             synchronize()
-        case let .atlas(index):
-            model.selectItem(at: index)
-            model.activateSelection()
         case let .command(command): model.runCommand(command)
         case .input:
             if model.isTextInputActive {
@@ -250,19 +251,16 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         if point.y < rowsTop + 6 { model.scroll(rows: -1) }
         else if point.y > rowsTop + CGFloat(model.visibleRowCount) * 32 - 6 { model.scroll(rows: 1) }
         let target: DropTarget?
-        if model.showBreadcrumb, NSRect(x: 40, y: 24, width: 160, height: 40).contains(point) {
-            target = DropTarget(id: nil, before: false, merge: false, row: nil)
-        } else {
-            let row = Int(floor((point.y - rowsTop) / 32)) + model.scrollIndex
-            if point.x >= 46, point.x <= 1394, point.y >= rowsTop,
-               row >= model.scrollIndex, row < model.scrollIndex + model.visibleRowCount,
-               model.items.indices.contains(row), model.items[row].kind != .add, model.items[row].id != source {
-                let item = model.items[row]
-                let dy = point.y - rowsTop - CGFloat(row - model.scrollIndex) * 32
-                target = DropTarget(id: item.id, before: dy < 16,
-                                    merge: item.kind == .bookmark && model.folderID == nil && dy >= 9 && dy <= 23, row: row)
-            } else { target = nil }
-        }
+        let row = Int(floor((point.y - rowsTop) / 32)) + model.scrollIndex
+        if point.x >= 46, point.x <= 1394, point.y >= rowsTop,
+           row >= model.scrollIndex, row < model.scrollIndex + model.visibleRowCount,
+           model.items.indices.contains(row), model.items[row].id != source {
+            let item = model.items[row]
+            let dy = point.y - rowsTop - CGFloat(row - model.scrollIndex) * 32
+            let sourceIsRoot = model.document.bookmarks.first { $0.id == source }?.groupId == nil
+            target = DropTarget(id: item.id, before: dy < 16,
+                                merge: sourceIsRoot && item.kind == .bookmark && item.groupID == nil && dy >= 9 && dy <= 23, row: row)
+        } else { target = nil }
         if target != dropTarget {
             mergeDelay?.cancel()
             mergeReady = false
@@ -349,25 +347,19 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             }
             return
         }
-        if model.showBreadcrumb {
-            D.text("根目录", 46, 43, size: 12.5, color: D.green)
-            D.icon("chevron", x: 96, y: 35, color: D.muted)
-            D.text(model.folderName, 118, 43, size: 16, bold: true, maxWidth: 1100)
-            hit(NSRect(x: 40, y: 24, width: 68, height: 40), "返回根目录", .root)
-        }
         let start = max(0, min(model.scrollIndex, model.items.count))
         let end = min(model.items.count, start + model.visibleRowCount)
         if start < end {
             for index in start..<end { drawItem(model.items[index], index: index, y: rowsTop + CGFloat(index - start) * 32) }
         }
-        if model.items.isEmpty || (model.items.count == 1 && model.items[0].kind == .add) {
+        if model.items.isEmpty {
             if !model.query.isEmpty {
                 D.icon("search", x: 706, y: 324, size: 28, color: D.muted)
                 D.text("没有匹配的书签", 720, 388, size: 16, color: D.ink2, bold: true, align: .center)
                 D.text("Enter 打开网址或用默认浏览器搜索“\(model.query)”", 720, 420, size: 12, color: D.muted, maxWidth: 1000, align: .center)
             } else {
                 D.text("∅", 720, 352, size: 38, color: D.muted.withAlphaComponent(0.42), align: .center)
-                D.text(model.folderID == nil ? "还没有书签" : "文件夹为空", 720, 402, size: 15, color: D.ink2, bold: true, align: .center)
+                D.text("还没有书签", 720, 402, size: 15, color: D.ink2, bold: true, align: .center)
                 D.text("按 a 添加书签 · :restore 从备份恢复", 720, 428, size: 12, color: D.muted, align: .center)
             }
         }
@@ -387,37 +379,36 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         let foreground = selected ? D.paper : D.ink
         let meta = selected ? D.mint : D.muted
         let cy = y + 16
+        let indent: CGFloat = item.depth > 0 ? 32 : 0
         if selected {
             D.rect(NSRect(x: 46, y: y + 1, width: 1348, height: 30), D.ink)
             D.rect(NSRect(x: 46, y: y + 1, width: 3, height: 30), D.yellow)
         }
         hit(NSRect(x: 46, y: y, width: 1348, height: 32), "\(item.title)\(item.url.map { "，" + $0 } ?? "，" + item.detail)", .item(index), selected: selected)
-        if item.kind == .add {
-            D.icon("plus", x: 92, y: cy - 8, color: selected ? D.mint : D.green)
-            D.text("添加书签", 126, cy, color: selected ? D.mint : D.green, bold: true)
-            D.key("a", x: 1368, y: cy, dark: selected, size: 10)
-            return
-        }
         if model.isOrganizing, item.kind == .bookmark {
             D.text("[×]", 54, cy, size: 12, color: selected ? D.lemon : D.red, bold: true)
             hit(NSRect(x: 46, y: y, width: 40, height: 32), "删除 \(item.title)", .delete(index))
-        } else {
-            let offset = model.items.first?.kind == .add ? 0 : 1
-            D.text(String(format: "%03d", index + offset), 82, cy, size: 11, color: selected ? D.yellow : D.muted, align: .right)
         }
         if item.kind == .folder {
-            D.icon("folder", x: 92, y: cy - 8, color: selected ? D.mint : D.purple)
-            D.text(item.title, 126, cy, color: selected ? D.paper : D.purple, bold: true, maxWidth: 1050)
-            D.text(item.detail + (model.isOrganizing ? " · 固定" : ""), 1390, cy, size: 11.5, color: meta, maxWidth: 180, align: .right)
+            D.icon(item.expanded ? "chevron-down" : "chevron", x: 74, y: cy - 8, color: selected ? D.yellow : D.muted)
+            hit(NSRect(x: 70, y: y, width: 26, height: 32), (item.expanded ? "折叠 " : "展开 ") + item.title, .toggle(index))
+            D.icon("folder", x: 98, y: cy - 10, size: 20, color: selected ? D.mint : D.purple)
+            D.text(item.title, 134, cy, color: selected ? D.paper : D.purple, bold: true, maxWidth: 1050)
+            let suffix = item.expanded ? " · 已展开" : ""
+            D.text(item.detail + suffix + (model.isOrganizing ? " · 固定" : ""), 1390, cy, size: 11.5, color: meta, maxWidth: 200, align: .right)
         } else {
-            D.tile(item, x: 92, y: cy)
+            if item.depth > 0 {
+                D.rect(NSRect(x: 106, y: y, width: 1, height: 32), D.line)
+                D.rect(NSRect(x: 106, y: cy, width: 18, height: 1), D.line)
+            }
+            D.tile(item, x: 98 + indent, y: cy)
             let hostWidth = min(420, D.width(item.detail, size: 12))
             let tag = model.query.isEmpty ? nil : item.groupName
             let tagWidth = tag.map { min(220, D.width($0, size: 10)) + 10 } ?? 0
-            let titleWidth = max(90, 1390 - hostWidth - 18 - 126 - (tag == nil ? 0 : tagWidth + 12))
-            D.text(item.title, 126, cy, color: foreground, maxWidth: titleWidth)
+            let titleWidth = max(90, 1390 - hostWidth - 18 - 134 - indent - (tag == nil ? 0 : tagWidth + 12))
+            D.text(item.title, 134 + indent, cy, color: foreground, maxWidth: titleWidth)
             if let tag {
-                let tagX = 136 + min(titleWidth, D.width(item.title, size: 14))
+                let tagX = 144 + indent + min(titleWidth, D.width(item.title, size: 14))
                 D.rect(NSRect(x: tagX, y: cy - 9, width: tagWidth, height: 18), D.line)
                 D.text(tag, tagX + 5, cy, size: 10, color: D.purple, maxWidth: tagWidth - 10)
             }
@@ -426,22 +417,17 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     }
 
     private func drawDropTarget() {
-        guard dragging, let target = dropTarget else { return }
+        guard dragging, let target = dropTarget, let row = target.row, model.items.indices.contains(row) else { return }
         typealias D = TerminalDrawing
-        if let row = target.row, model.items.indices.contains(row) {
-            let y = rowsTop + CGFloat(row - model.scrollIndex) * 32
-            let item = model.items[row]
-            let label = item.kind == .folder ? "移入「\(item.title)」" : target.merge && mergeReady ? "＋ 创建文件夹" : target.merge ? "停留以创建文件夹" : "插入到此"
-            let width = min(500, D.width(label, size: 11) + 16)
-            D.green.setStroke()
-            NSBezierPath(rect: NSRect(x: 46, y: y + 1, width: 1348, height: 30)).stroke()
-            D.rule(46, target.before ? y : y + 31, 1348, color: D.green, height: 2)
-            D.rect(NSRect(x: 1394 - width, y: y - 20, width: width, height: 18), D.mint)
-            D.text(label, 1402 - width, y - 11, size: 11, color: D.pine, bold: true, maxWidth: width - 16)
-        } else {
-            D.rect(NSRect(x: 40, y: 24, width: 80, height: 36), D.mint)
-            D.text("移回根目录", 46, 43, size: 12, color: D.pine)
-        }
+        let y = rowsTop + CGFloat(row - model.scrollIndex) * 32
+        let item = model.items[row]
+        let label = item.kind == .folder ? "移入「\(item.title)」" : target.merge && mergeReady ? "＋ 创建文件夹" : target.merge ? "停留以创建文件夹" : "插入到此"
+        let width = min(500, D.width(label, size: 11) + 16)
+        D.green.setStroke()
+        NSBezierPath(rect: NSRect(x: 46, y: y + 1, width: 1348, height: 30)).stroke()
+        D.rule(46, target.before ? y : y + 31, 1348, color: D.green, height: 2)
+        D.rect(NSRect(x: 1394 - width, y: y - 20, width: width, height: 18), D.mint)
+        D.text(label, 1402 - width, y - 11, size: 11, color: D.pine, bold: true, maxWidth: width - 16)
     }
 
     private func drawOutput() {
@@ -524,8 +510,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         if !model.isTextInputActive {
             if model.prompt != nil { D.text(model.inputText, inputX, 773, size: 15.5, maxWidth: 1400 - inputX - hintWidth - 24) }
             else {
-                D.rect(NSRect(x: inputX + 2, y: 764, width: 7, height: 18), D.amber)
-                D.text(model.buffer == .settings ? ": 输入命令 · :help 查看帮助" : ": 打开命令 · / 搜索 · ? 帮助", inputX + 16, 773, color: D.muted)
+                D.text(model.buffer == .settings ? ": 输入命令 · :help 查看帮助" : ": 打开命令 · / 搜索 · ? 帮助", inputX + 2, 773, color: D.muted)
             }
         }
         if !commandHint.isEmpty {
@@ -536,16 +521,24 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         D.rect(NSRect(x: 0, y: 796, width: 1440, height: 36), D.forest)
         D.text(model.modeLabel, 40, 815.5, size: 12.5, color: D.yellow, bold: true, maxWidth: 800)
         if model.buffer == nil {
-            let location = model.query.isEmpty ? model.folderName : "“\(model.query)”"
-            let position = model.items.isEmpty ? "0/0" : "\(model.selectedIndex + 1)/\(model.items.count)"
-            let x = 72 + D.width(model.modeLabel, size: 12.5, bold: true)
-            D.text("· \(location) · \(position)", x, 815.5, size: 12.5,
-                   color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
+            let status: String?
+            if !model.query.isEmpty {
+                status = "“\(model.query)” · \(model.items.count) 条结果"
+            } else if !model.expandedGroupIDs.isEmpty {
+                status = "已展开 \(model.expandedGroupIDs.count) 个文件夹"
+            } else {
+                status = nil
+            }
+            if let status {
+                let x = 72 + D.width(model.modeLabel, size: 12.5, bold: true)
+                D.text("· \(status)", x, 815.5, size: 12.5,
+                       color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
+            }
         }
-        D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · F1 地图 · ? 帮助", 1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
+        D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · ? 帮助", 1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
         if model.buffer == nil {
             var x: CGFloat = 40
-            for (key, label) in [("j / k", "移动"), ("/", "搜索"), (":", "命令"), ("a", "添加"), ("n", "新建文件夹"), ("e", "编辑"), ("m", "移动"), ("D", "删除"), ("o", "排序整理"), ("F1", "地图"), ("?", "帮助")] {
+            for (key, label) in [("j / k", "移动"), ("Enter", "打开 / 展开"), ("Tab", "展开 / 折叠"), ("z", "全部展开"), ("/", "搜索"), (":", "命令"), ("a", "添加"), ("n", "新建文件夹"), ("e", "编辑"), ("m", "移动"), ("D", "删除"), ("o", "排序整理"), ("?", "帮助")] {
                 let width = D.key(key, x: x, y: 856)
                 D.text(label, x + width + 6, 856.5, size: 11.5, color: D.muted)
                 x += width + 24 + D.width(label, size: 11.5)

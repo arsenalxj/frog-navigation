@@ -9,10 +9,10 @@ extension LauncherModel {
         .init(name: "mkdir", summary: "创建文件夹", usage: ":mkdir [名称]", detail: "空参数进入名称提示流"),
         .init(name: "move", summary: "移动所选书签", usage: ":move", detail: "根目录 / 现有文件夹 / 新建文件夹；Enter 前不写入"),
         .init(name: "delete", summary: "删除所选项", usage: ":delete", detail: "y 确认，N/Enter/Esc 取消；只可删除空文件夹"),
-        .init(name: "open", summary: "打开书签或文件夹", usage: ":open [行号]", detail: "无参数打开当前项；网址交给系统默认浏览器"),
+        .init(name: "open", summary: "打开书签或切换文件夹", usage: ":open", detail: "打开当前选中项；文件夹展开或折叠；网址交给系统默认浏览器"),
         .init(name: "copy", summary: "复制所选书签网址", usage: ":copy", detail: "写入系统剪贴板"),
         .init(name: "find", summary: "搜索标题和网址", usage: ":find [关键词]", detail: "上下选择；无结果 Enter 打开网址或 Google 搜索"),
-        .init(name: "group", summary: "进入文件夹", usage: ":group 名称", detail: "完整名称或唯一前缀；:group 根目录 返回"),
+        .init(name: "group", summary: "展开并定位文件夹", usage: ":group 名称", detail: "完整名称或唯一前缀；:group 根目录 折叠全部"),
         .init(name: "backup", summary: "导出 JSON 备份", usage: ":backup [文件路径]", detail: "真实数据快照；支持空格和 ~；不能覆盖当前 bookmarks.json"),
         .init(name: "restore", summary: "从 JSON 整体恢复", usage: ":restore [文件路径]", detail: "Enter 执行校验并整体替换全部书签和文件夹；不合并数据"),
         .init(name: "cd", summary: "切换数据目录", usage: ":cd [目录路径]", detail: "已有 bookmarks.json 直接读取；空目录写入当前数据；旧目录保留"),
@@ -21,7 +21,6 @@ extension LauncherModel {
         .init(name: "clear", summary: "清空本次运行日志", usage: ":clear", detail: "不修改书签或文件"),
         .init(name: "help", summary: "查看命令帮助", usage: ":help", detail: "浏览：j/k/上下 · g/G · PageUp/Down · Enter · / 搜索 · : 命令 · o 整理"),
         .init(name: "log", summary: "查看操作日志", usage: ":log", detail: "仅显示本次运行真实事件，保留最近 200 条"),
-        .init(name: "atlas", summary: "可操作的命令地图", usage: ":atlas", detail: "F1 · 上下选择 · Enter 执行 · Esc 返回"),
         .init(name: "q", summary: "退出青蛙导航", usage: ":q", detail: "退出当前应用")
     ]
 
@@ -47,24 +46,38 @@ extension LauncherModel {
         case "move": beginMove()
         case "delete": requestDeleteSelection()
         case "open":
-            if !argument.isEmpty {
-                guard let number = Int(argument), number >= 1, number <= items.count else {
-                    commandError("没有第 \(argument) 个可打开项。")
-                    return
-                }
-                selectedIndex = number - 1
-                clampSelection()
+            guard argument.isEmpty else {
+                commandError("用法：:open；命令作用于当前选中项。")
+                return
             }
             buffer = nil
             activateSelection()
         case "copy": copySelection()
         case "find": startSearch(); updateInput(argument)
         case "group":
-            if ["根目录", "root", "/"].contains(argument) { buffer = nil; closeFolder(); return }
+            if ["根目录", "root", "/"].contains(argument) {
+                buffer = nil
+                query = ""
+                scrollIndex = 0
+                let keep = selectedGroupID()
+                expandedGroupIDs = []
+                persistExpanded()
+                rebuildItems(selecting: keep)
+                appendLog("折叠全部文件夹", .info)
+                return
+            }
             guard !argument.isEmpty else { commandError("用法：:group 文件夹名称 / 根目录"); return }
             let exact = document.groups.first { $0.name == argument }
             let matches = document.groups.filter { $0.name.hasPrefix(argument) }
-            if let group = exact ?? (matches.count == 1 ? matches.first : nil) { enterFolder(group.id) }
+            if let group = exact ?? (matches.count == 1 ? matches.first : nil) {
+                buffer = nil
+                query = ""
+                scrollIndex = 0
+                expandedGroupIDs.insert(group.id)
+                persistExpanded()
+                rebuildItems(selecting: group.id)
+                appendLog("已展开并定位文件夹 \(group.name)", .info)
+            }
             else { commandError(matches.count > 1 ? "多个文件夹匹配，请输入完整名称。" : "找不到文件夹 “\(argument)”。") }
         case "backup", "restore", "cd":
             beginFilePrompt(name, path: argument.isEmpty ? nil : argument)
@@ -72,7 +85,6 @@ extension LauncherModel {
         case "set": runSetting(argument)
         case "help": openBuffer(.help)
         case "log": openBuffer(.log)
-        case "atlas": openBuffer(.atlas)
         case "clear":
             logs = []
             if buffer == .log { bufferOffset = 0 }
