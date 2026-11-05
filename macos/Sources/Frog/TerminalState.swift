@@ -1,8 +1,8 @@
 import Foundation
 
 // 原生绘制与命令模型共用的值类型；界面只消费真实状态，不包含原型场景模拟。
-enum TerminalBuffer: String { case settings, help, log, job }
-enum TerminalInputKind { case command, search, prompt }
+enum TerminalBuffer: String { case settings, help, log, job, calc }
+enum TerminalInputKind { case command, search, prompt, calc }
 enum TerminalItemKind { case bookmark, folder }
 enum TerminalLevel { case normal, muted, info, success, warning, error, command }
 enum TerminalJobStatus { case running, success, failure }
@@ -52,6 +52,13 @@ struct TerminalJob: Equatable {
     var title: String
     var status: TerminalJobStatus
     var lines: [TerminalLogEntry]
+}
+
+struct TerminalCalcEntry: Identifiable, Equatable {
+    let id: Int
+    var time: String
+    var expression: String
+    var value: String
 }
 
 struct TerminalSettingRow: Equatable {

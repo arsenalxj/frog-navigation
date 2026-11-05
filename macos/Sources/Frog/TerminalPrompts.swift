@@ -20,6 +20,8 @@ extension LauncherModel {
         prompt = nil
         inputKind = nil
         draft = Draft()
+        // 异步提交期间 busy 仍为 true，这里直接恢复计算器，而不是等待 busy 清零。
+        if buffer == .calc { setInput(.calc, text: calcExpression) }
     }
 
     func addBookmark() {

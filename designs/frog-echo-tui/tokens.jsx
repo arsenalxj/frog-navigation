@@ -57,6 +57,9 @@ const LAYOUT = {
 /* 列表可视区几何：单页滚动，不分页；文件夹内预留面包屑高度 */
 const CRUMB_H = 40;
 
+/* 计算器历史一次显示的行数；绘制与方向键滚动共用 */
+const CALC_VISIBLE_ROWS = 16;
+
 function frogListGeom(showCrumb) {
   const rowsTop = LAYOUT.list.y + (showCrumb ? CRUMB_H : 0);
   const rowsBottom = LAYOUT.log.y - 16;
@@ -72,7 +75,8 @@ function frogShowsCrumb(s) {
   return !!s.folderId && !s.query.trim();
 }
 
-const FONT_MONO = '"SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "PingFang SC", "Noto Sans Mono CJK SC", monospace';
+/* 通用 monospace 必须排在中文兜底之前：否则 ASCII 会落到 PingFang 的比例数字上。 */
+const FONT_MONO = '"SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, ui-monospace, monospace, "PingFang SC", "Noto Sans Mono CJK SC"';
 const FONT_SANS = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif';
 
 const TYPE = {
@@ -106,6 +110,7 @@ const COMMANDS = [
   ["copy", "复制当前链接", "copy", ""],
   ["group", "进入文件夹", "group <名称>", "根目录：group 根目录"],
   ["find", "搜索", "find <关键词>", "等同 /"],
+  ["calc", "计算器", "calc [clear]", "支持 + - * / 与括号，历史保留"],
   ["set", "查看或修改设置", "set [key] [value]", "无参数打开设置缓冲区"],
   ["backup", "导出备份", "backup [文件路径]", "另存书签与文件夹 JSON"],
   ["restore", "恢复备份", "restore <备份文件>", "替换当前全部书签与文件夹"],

@@ -24,7 +24,8 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     var regions: [Region] = []
 
     enum Action {
-        case item(Int), delete(Int), toggle(Int), choice(Int), complete(String), draft(String), command(String), input
+        case item(Int), delete(Int), toggle(Int), choice(Int), complete(String), draft(String),
+             command(String), calcRow(Int), input
     }
     struct Region {
         let rect: NSRect
@@ -85,9 +86,14 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    static let calcLabel = "calc › 算式"
+
     private var inputX: CGFloat {
-        guard let prompt = model.prompt else { return 58 }
-        return min(480, 70 + TerminalDrawing.width(prompt.label, size: 13))
+        if let prompt = model.prompt { return min(480, 70 + TerminalDrawing.width(prompt.label, size: 13)) }
+        if model.buffer == .calc, model.inputKind == .calc {
+            return 70 + TerminalDrawing.width(Self.calcLabel, size: 13)
+        }
+        return 58
     }
 
     private var commandHint: String {
@@ -95,6 +101,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         switch model.inputKind {
         case .search: return "Enter 打开 · Esc 清空"
         case .command: return "Tab 补全 · ↑↓ 历史 · Esc 取消"
+        case .calc: return model.calcFeedback ?? "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭"
         default: return ""
         }
     }
@@ -172,6 +179,26 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ notification: Notification) {
+        if model.inputKind == .calc, let editor = input.currentEditor() as? NSTextView {
+            // 输入法组合中保留原文，提交后再归一化，避免打断组合。
+            guard !editor.hasMarkedText() else { return }
+            let raw = input.stringValue
+            let filtered = TerminalCalculator.filtered(raw)
+            if filtered != raw {
+                let selection = editor.selectedRange()
+                let rawText = raw as NSString
+                let prefix = rawText.substring(to: min(selection.location, rawText.length))
+                let mapped = (TerminalCalculator.filtered(prefix) as NSString).length
+                input.stringValue = filtered
+                editor.setSelectedRange(NSRange(location: min(mapped, (filtered as NSString).length), length: 0))
+                model.updateInput(filtered)
+            } else {
+                model.updateInput(raw)
+            }
+            savedSelection = editor.selectedRange()
+            savedRevision = model.inputRevision
+            return
+        }
         model.updateInput(input.stringValue)
         if let editor = input.currentEditor() as? NSTextView {
             savedSelection = editor.selectedRange()
@@ -234,6 +261,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             model.updateInput(command + " ")
             synchronize()
         case let .command(command): model.runCommand(command)
+        case let .calcRow(index): model.selectCalcEntry(at: index)
         case .input:
             if model.isTextInputActive {
                 focusInput(selection: (input.currentEditor() as? NSTextView)?.selectedRange() ?? savedSelection)
@@ -312,7 +340,8 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         context.scaleBy(x: scale, y: scale)
         context.clip(to: CGRect(x: 0, y: 0, width: 1440, height: 900))
         regions.removeAll(keepingCapacity: true)
-        let showsOutput = model.buffer == nil || model.prompt != nil || model.inputKind != nil
+        let showsOutput = model.buffer == nil || model.prompt != nil || model.inputKind == .command
+            || (model.inputKind != nil && model.buffer != .calc)
         if let buffer = model.buffer {
             context.saveGState()
             if showsOutput { context.clip(to: CGRect(x: 40, y: 24, width: 1360, height: 624)) }
@@ -504,9 +533,13 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             D.rect(NSRect(x: 0, y: 752, width: 3, height: 40), D.yellow)
         }
         D.rule(0, 752, 1440)
-        let symbol = model.inputKind == .search ? "/" : model.inputKind != nil || model.prompt != nil ? ":" : "›"
-        D.text(symbol, 40, 773, size: 17, color: model.inputKind == .search ? D.teal : model.inputKind != nil || model.prompt != nil ? D.amber : D.green, bold: true)
+        let isCalc = model.buffer == .calc && model.inputKind == .calc
+        let symbol = isCalc ? "=" : model.inputKind == .search ? "/" : model.inputKind != nil || model.prompt != nil ? ":" : "›"
+        let symbolColor = isCalc ? D.green : model.inputKind == .search ? D.teal
+            : model.inputKind != nil || model.prompt != nil ? D.amber : D.green
+        D.text(symbol, 40, 773, size: 17, color: symbolColor, bold: true)
         if let prompt = model.prompt { D.text(prompt.label, 58, 773, size: 13, color: D.muted, maxWidth: inputX - 70) }
+        else if isCalc { D.text(Self.calcLabel, 58, 773, size: 13, color: D.muted, maxWidth: inputX - 70) }
         if !model.isTextInputActive {
             if model.prompt != nil { D.text(model.inputText, inputX, 773, size: 15.5, maxWidth: 1400 - inputX - hintWidth - 24) }
             else {
@@ -514,8 +547,10 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             }
         }
         if !commandHint.isEmpty {
-            D.text(commandHint, 1400, 773, size: 12, color: model.prompt?.error == nil ? D.muted : D.red, maxWidth: hintWidth, align: .right)
-            hit(NSRect(x: 1400 - hintWidth, y: 752, width: hintWidth, height: 40), commandHint)
+            let hintColor: NSColor = model.prompt?.error != nil ? D.red
+                : isCalc && model.calcFeedback != nil ? D.level(model.calcFeedbackLevel) : D.muted
+            D.text(commandHint, 1400, 773, size: 12, color: hintColor, maxWidth: hintWidth, align: .right)
+            hit(NSRect(x: 1400 - hintWidth, y: 752, width: hintWidth, height: 40), commandHint, .input)
         }
         hit(NSRect(x: 40, y: 752, width: 1360 - hintWidth - 24, height: 40), "命令行输入", .input)
         D.rect(NSRect(x: 0, y: 796, width: 1440, height: 36), D.forest)
@@ -535,7 +570,9 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                        color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
             }
         }
-        D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · ? 帮助", 1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
+        D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回"
+               : model.buffer == .calc ? ": 命令 · Esc 关闭并保留算式" : ": 命令 · ? 帮助",
+               1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
         if model.buffer == nil {
             var x: CGFloat = 40
             for (key, label) in [("j / k", "移动"), ("Enter", "打开 / 展开"), ("Tab", "展开 / 折叠"), ("z", "全部展开"), ("/", "搜索"), (":", "命令"), ("a", "添加"), ("n", "新建文件夹"), ("e", "编辑"), ("m", "移动"), ("D", "删除"), ("o", "排序整理"), ("?", "帮助")] {

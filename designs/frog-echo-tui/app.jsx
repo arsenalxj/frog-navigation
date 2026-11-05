@@ -52,6 +52,7 @@ const FROG_SCENES = [
     ["buffer-settings-finder-error", "Finder 读取失败"],
     ["buffer-help", "帮助 · man page"],
     ["buffer-atlas", "界面地图"],
+    ["buffer-calc", "计算器"],
     ["buffer-log", "完整日志"],
   ]},
   { group: "任务输出", items: [
@@ -100,6 +101,8 @@ function baseState() {
     flash: null,
     log: [],
     job: null,
+    calc: { expr: "", caret: 0, selectionEnd: 0, history: [], histIndex: -1,
+      offset: 0, error: null, copied: null },
     atlasCursor: 0,
     filepanel: { hidden: false },
     sceneId: null,
@@ -197,7 +200,11 @@ const SHORTCUTS = [
 function App() {
   const [s, setS] = useState(baseState);
   const imeRef = useRef(null);
+  const composingRef = useRef(false);
+  const calcCaretRef = useRef(null);
   const logSeq = useRef(0);
+  const calcSeq = useRef(0);
+  const calcCopySeq = useRef(0);
   const histRef = useRef([]);
   const booted = useRef(false);
 
@@ -224,10 +231,16 @@ function App() {
       return { kind: "prompt", key: `${s.prompt.cmd}:${s.prompt.step}`, value: s.prompt.value };
     }
     if (s.input) return { kind: "input", key: "input:" + s.input.kind, value: s.input.value };
+    if (s.buffer === "calc") return {
+      kind: "calc", key: "calc:expr", value: s.calc.expr,
+      caret: s.calc.caret, selectionEnd: s.calc.selectionEnd,
+    };
     return null;
   }, [s]);
 
-  const setActiveText = useCallback((value) => {
+  const setActiveText = useCallback((value, selection = null, composing = false) => {
+    const start = selection ? selection.start : null;
+    const end = selection ? selection.end : null;
     setS((p) => {
       if (p.prompt && p.prompt.cmd !== "hotkey" && p.prompt.cmd !== "delete") {
         const candidates = p.prompt.candidates ?? p.prompt.options ?? [];
@@ -247,7 +260,33 @@ function App() {
           scroll: p.input.kind === "search" ? 0 : p.scroll,
         };
       }
+      if (p.buffer === "calc") {
+        // 输入法组合期间保留原文，提交后再转换，避免打断组合。
+        const expr = composing ? value.slice(0, frogCalcMaxLength) : frogCalcFilter(value);
+        let caret = Math.min(start == null ? p.calc.caret : start, expr.length);
+        let selectionEnd = Math.min(end == null ? p.calc.selectionEnd : end, expr.length);
+        if (selectionEnd < caret) selectionEnd = caret;
+        // 归一化会改写原生输入框内容，恢复后把光标放回同一位置。
+        if (expr !== value) calcCaretRef.current = caret;
+        return { ...p, calc: { ...p.calc, expr, caret, selectionEnd, histIndex: -1, error: null, copied: null } };
+      }
       return p;
+    });
+  }, []);
+
+  /* 计算器：把原生输入框的光标/选区同步到状态，SVG 才能画在正确位置。 */
+  const syncActiveSelection = useCallback(() => {
+    if (composingRef.current || calcCaretRef.current != null) return;
+    const el = imeRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? start;
+    setS((p) => {
+      if (p.buffer !== "calc" || p.input || p.prompt) return p;
+      const caret = Math.min(start, p.calc.expr.length);
+      const selectionEnd = Math.min(Math.max(caret, end), p.calc.expr.length);
+      if (p.calc.caret === caret && p.calc.selectionEnd === selectionEnd) return p;
+      return { ...p, calc: { ...p.calc, caret, selectionEnd } };
     });
   }, []);
 
@@ -260,7 +299,19 @@ function App() {
       if (el.value !== activeText.value) el.value = activeText.value;
       if (document.activeElement !== el) el.focus({ preventScroll: true });
       // SVG 没有显示全选状态，进入字段时将光标放到末尾，避免退格清空整段。
-      if (entering) el.setSelectionRange(el.value.length, el.value.length);
+      if (calcCaretRef.current != null) {
+        const pos = Math.min(calcCaretRef.current, el.value.length);
+        el.setSelectionRange(pos, pos);
+        calcCaretRef.current = null;
+      } else if (entering) {
+        const start = activeText.kind === "calc"
+          ? Math.min(activeText.caret ?? el.value.length, el.value.length)
+          : el.value.length;
+        const end = activeText.kind === "calc"
+          ? Math.min(Math.max(start, activeText.selectionEnd ?? start), el.value.length)
+          : el.value.length;
+        el.setSelectionRange(start, end);
+      }
     } else if (document.activeElement === el) {
       el.blur();
     }
@@ -295,7 +346,106 @@ function App() {
     return p;
   });
 
-  const focusInput = () => setTimeout(() => { if (imeRef.current) imeRef.current.focus(); }, 0);
+  const focusInput = () => setTimeout(() => {
+    const el = imeRef.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    if (s.buffer === "calc" && !s.input && !s.prompt) {
+      const start = Math.min(s.calc.caret ?? el.value.length, el.value.length);
+      const end = Math.min(Math.max(start, s.calc.selectionEnd ?? start), el.value.length);
+      el.setSelectionRange(start, end);
+    }
+  }, 0);
+  const focusInputEnd = () => setTimeout(() => {
+    const el = imeRef.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, 0);
+
+  /* ---------------- 计算器 ---------------- */
+  const evalCalc = () => {
+    const expr = s.calc.expr.trim();
+    if (!expr) {
+      setS((p) => ({ ...p, calc: { ...p.calc, error: { expr: "", message: "请输入算式" } } }));
+      return;
+    }
+    const out = frogCalcTry(expr);
+    if (!out.ok) {
+      setS((p) => ({ ...p, calc: { ...p.calc, error: { expr, message: out.message } } }));
+      return;
+    }
+    const entry = { id: ++calcSeq.current, time: nowTime(), expr, value: frogCalcFormat(out.value) };
+    calcCaretRef.current = expr.length;
+    setS((p) => {
+      const history = [entry, ...p.calc.history.filter((h) => h.expr !== expr)].slice(0, 50);
+      return { ...p, calc: { ...p.calc, expr, caret: expr.length, selectionEnd: expr.length,
+        history, histIndex: -1, offset: 0, error: null, copied: null } };
+    });
+  };
+
+  const browseCalcHistory = (older) => setS((p) => {
+    const { history, histIndex } = p.calc;
+    if (!history.length) return p;
+    const next = histIndex < 0
+      ? 0
+      : Math.min(history.length - 1, Math.max(0, histIndex + (older ? -1 : 1)));
+    if (next === histIndex) return p;
+    const expr = history[next].expr;
+    let offset = p.calc.offset || 0;
+    if (next < offset) offset = next;
+    else if (next >= offset + CALC_VISIBLE_ROWS) offset = next - CALC_VISIBLE_ROWS + 1;
+    offset = Math.min(Math.max(0, offset), Math.max(0, history.length - CALC_VISIBLE_ROWS));
+    calcCaretRef.current = expr.length;
+    return { ...p, calc: { ...p.calc, histIndex: next, expr, offset,
+      caret: expr.length, selectionEnd: expr.length, error: null } };
+  });
+
+  const useCalcEntry = (id) => {
+    setS((p) => {
+      const index = p.calc.history.findIndex((h) => h.id === id);
+      if (index < 0) return p;
+      const entry = p.calc.history[index];
+      let offset = p.calc.offset || 0;
+      if (index < offset) offset = index;
+      else if (index >= offset + CALC_VISIBLE_ROWS) offset = index - CALC_VISIBLE_ROWS + 1;
+      offset = Math.min(Math.max(0, offset), Math.max(0, p.calc.history.length - CALC_VISIBLE_ROWS));
+      return { ...p, calc: { ...p.calc, expr: entry.expr, caret: entry.expr.length,
+        selectionEnd: entry.expr.length, histIndex: index, offset, error: null } };
+    });
+    focusInputEnd();
+  };
+
+  const resetCalc = () => {
+    calcCaretRef.current = 0;
+    setS((p) => ({
+      ...p, calc: { expr: "", caret: 0, selectionEnd: 0, history: [], histIndex: -1,
+        offset: 0, error: null, copied: null },
+    }));
+  };
+
+  const flashCalcCopy = (text) => {
+    const seq = ++calcCopySeq.current;
+    setS((p) => ({ ...p, calc: { ...p.calc, copied: text } }));
+    setTimeout(() => {
+      if (calcCopySeq.current === seq) setS((p) => ({ ...p, calc: { ...p.calc, copied: null } }));
+    }, 1400);
+  };
+
+  const copyCalcResult = () => {
+    const selected = s.calc.histIndex >= 0 ? s.calc.history[s.calc.histIndex] : null;
+    let text = selected ? selected.value : null;
+    if (text == null) {
+      const expr = s.calc.expr.trim();
+      const out = expr ? frogCalcTry(expr) : null;
+      if (out && out.ok) text = frogCalcFormat(out.value);
+    }
+    if (text == null) { flashCalcCopy("✗ 没有可复制的结果"); return; }
+    if (!navigator.clipboard) { flashCalcCopy("✗ 复制失败"); return; }
+    navigator.clipboard.writeText(text)
+      .then(() => flashCalcCopy(`✓ 已复制 ${text}`))
+      .catch(() => flashCalcCopy("✗ 复制失败"));
+  };
 
   /* ---------------- 提示流 ---------------- */
   const beginPrompt = (prompt) => setS((p) => ({
@@ -788,6 +938,19 @@ function App() {
       return;
     }
     if (name === "find") { setS((p) => ({ ...p, input: { kind: "search", value: arg }, query: arg, scroll: 0, cursor: 0 })); return; }
+    if (name === "calc" || name === "calculator") {
+      if (arg) {
+        if (arg.toLowerCase() === "clear") {
+          resetCalc();
+          finish("✓ 计算器已清空", "ok");
+        } else {
+          finish("✗ 用法：:calc 打开计算器，:calc clear 清空", "error");
+        }
+        return;
+      }
+      openBuffer("calc");
+      return;
+    }
     if (name === "set") { runSet(rest[0], rest.slice(1).join(" ")); return; }
     finish(`✗ 未知命令 “${nameRaw}” · 输入 :help 查看命令`, "error");
   };
@@ -997,6 +1160,19 @@ function App() {
       case "buffer-settings-corner-error": next = { ...next, buffer: "settings", settings: { ...st.settings, cornerError: "无法监听鼠标事件，屏幕触角未生效。" } }; break;
       case "buffer-settings-finder-missing": next = { ...next, buffer: "settings", settings: { ...st.settings, finderJump: true, finderMissing: true } }; break;
       case "buffer-settings-finder-error": next = { ...next, buffer: "settings", settings: { ...st.settings, finderJump: true, finderError: "无法读取 Finder 窗口：自动化权限被拒绝。" } }; break;
+      case "buffer-calc":
+        calcSeq.current = 3;
+        next = { ...next, buffer: "calc", calc: {
+          expr: "12 * (8 - 3)",
+          caret: 12,
+          selectionEnd: 12,
+          history: [
+            { id: 1, time: "09:41:02", expr: "12 * (8 - 3)", value: "60" },
+            { id: 2, time: "09:40:51", expr: "0.1 + 0.2", value: "0.3" },
+            { id: 3, time: "09:39:12", expr: "(2 + 3) * 4", value: "20" },
+          ],
+          histIndex: -1, offset: 0, error: null, copied: null,
+        } }; break;
       case "buffer-help": next = { ...next, buffer: "help" }; break;
       case "buffer-atlas": next = { ...next, buffer: "atlas", atlasCursor: 0 }; break;
       case "buffer-log": next = { ...next, buffer: "log", log: [
@@ -1092,6 +1268,19 @@ function App() {
           if (flat[s.atlasCursor]) jumpScene(flat[s.atlasCursor]);
           return;
         }
+        return;
+      }
+      if (s.buffer === "calc" && !s.input && !s.prompt) {
+        if (k === "Escape") { e.preventDefault(); closeBuffer(); return; }
+        if (k === "Enter" || (k === "=" && !mod)) { e.preventDefault(); evalCalc(); return; }
+        if (k === "ArrowUp" || k === "ArrowDown") {
+          e.preventDefault(); browseCalcHistory(k === "ArrowUp"); return;
+        }
+        if (k === "c" && !mod) { e.preventDefault(); copyCalcResult(); return; }
+        if (k === ":") { e.preventDefault(); startCommand(); return; }
+        if (k === "Tab") { e.preventDefault(); return; }
+        // 算式只接受数字、运算符、括号、小数点与空格，其余字符不进入输入框。
+        if (!mod && k.length === 1 && !/[\d+\-*/().eE（）\s]/.test(k)) { e.preventDefault(); return; }
         return;
       }
       if (s.buffer && !s.input && !s.prompt) {
@@ -1245,6 +1434,7 @@ function App() {
     openBookmark, copyBookmark,
     startAdd, startEdit, startRename, beginDelete, requestDelete, beginMove, startMove, toggleOrganize,
     startCommand, startSearch, cancel: cancelAll, submit: submitInput, setActiveText, focusInput,
+    evalCalc, browseCalcHistory, calcUse: useCalcEntry, resetCalc, syncSelection: syncActiveSelection,
     openSettings: () => openBuffer("settings"), openBuffer, closeBuffer, openAtlas: () => openBuffer("atlas"),
     openHelp: () => openBuffer("help"), openLog: () => openBuffer("log"),
     openFilePanel: () => setS((p) => ({ ...p, screen: "filepanel", filepanel: { hidden: false } })),
@@ -1279,7 +1469,7 @@ function App() {
 
         {!showFilepanel && <CommandChrome s={s} act={act} />}
         <StatusChrome s={s} ctx={ctx} />
-        {s.buffer !== "settings" && <HintsChrome />}
+        {s.buffer !== "settings" && s.buffer !== "calc" && <HintsChrome />}
       </svg>
 
       <input
@@ -1289,7 +1479,20 @@ function App() {
         autoCorrect="off"
         spellCheck={false}
         aria-label="命令行输入"
-        onChange={(e) => act.setActiveText(e.target.value)}
+        onChange={(e) => act.setActiveText(e.target.value, {
+          start: e.target.selectionStart ?? e.target.value.length,
+          end: e.target.selectionEnd ?? e.target.value.length,
+        }, composingRef.current)}
+        onSelect={() => act.syncSelection()}
+        onKeyUp={() => act.syncSelection()}
+        onCompositionStart={() => { composingRef.current = true; }}
+        onCompositionEnd={(e) => {
+          composingRef.current = false;
+          act.setActiveText(e.target.value, {
+            start: e.target.selectionStart ?? e.target.value.length,
+            end: e.target.selectionEnd ?? e.target.value.length,
+          });
+        }}
       />
     </div>
   );

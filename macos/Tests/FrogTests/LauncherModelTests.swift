@@ -857,6 +857,150 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertNil(model.inputKind)
     }
 
+    func testCalculatorOpensEvaluatesFiltersAndPreservesExpression() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+        XCTAssertTrue(model.isTextInputActive)
+        model.updateInput("（1+2）*3abc")
+        XCTAssertEqual(model.inputText, "(1+2)*3")
+        XCTAssertEqual(model.calcExpression, "(1+2)*3")
+        XCTAssertTrue(model.handleKey(try key(36), isTextEditing: true))
+        XCTAssertEqual(model.calcHistory.count, 1)
+        XCTAssertEqual(model.calcHistory.first?.value, "9")
+        XCTAssertEqual(model.inputText, "(1+2)*3")
+        XCTAssertNil(model.calcError)
+        model.escape()
+        XCTAssertNil(model.buffer)
+        XCTAssertNil(model.inputKind)
+        model.runCommand("calc")
+        XCTAssertEqual(model.inputText, "(1+2)*3")
+        XCTAssertEqual(model.calcHistory.count, 1)
+    }
+
+    func testCalculatorRejectsInvalidExpressionsWithoutWritingHistory() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.updateInput("1/0")
+        XCTAssertTrue(model.handleKey(try key(36), isTextEditing: true))
+        XCTAssertEqual(model.calcHistory.count, 0)
+        XCTAssertEqual(model.calcError, "不能除以 0")
+        XCTAssertNil(model.calcFeedback)
+        model.updateInput("1+2")
+        XCTAssertNil(model.calcError)
+        XCTAssertNil(model.calcFeedback)
+        XCTAssertTrue(model.handleKey(try key(24, "="), isTextEditing: true))
+        XCTAssertEqual(model.calcHistory.count, 1)
+        XCTAssertEqual(model.calcHistory.first?.value, "3")
+    }
+
+    func testCalculatorHistoryMovesInListOrderAndCopiesSelectedResult() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.updateInput("12*(8-3)")
+        model.submitCalc()
+        model.updateInput("7*6")
+        model.submitCalc()
+        XCTAssertEqual(model.calcHistory.map(\.value), ["42", "60"])
+        XCTAssertNil(model.calcHistoryIndex)
+        XCTAssertTrue(model.handleKey(try key(126), isTextEditing: true))
+        XCTAssertEqual(model.calcHistoryIndex, 0)
+        XCTAssertEqual(model.inputText, "7*6")
+        XCTAssertTrue(model.handleKey(try key(125), isTextEditing: true))
+        XCTAssertEqual(model.calcHistoryIndex, 1)
+        XCTAssertEqual(model.inputText, "12*(8-3)")
+        XCTAssertTrue(model.handleKey(try key(126), isTextEditing: true))
+        XCTAssertEqual(model.inputText, "7*6")
+        model.selectCalcEntry(at: 1)
+        XCTAssertEqual(model.calcHistoryIndex, 1)
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(model.handleKey(try key(8, "c"), isTextEditing: true))
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "60")
+        XCTAssertEqual(model.calcFeedback, "✓ 已复制 60")
+        XCTAssertEqual(model.inputText, "12*(8-3)")
+    }
+
+    func testCalculatorCopyHandlesLiveAndMissingResults() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(model.handleKey(try key(8, "c"), isTextEditing: true))
+        XCTAssertEqual(model.calcFeedback, "✗ 没有可复制的结果")
+        model.updateInput("12*(8-3)")
+        XCTAssertTrue(model.handleKey(try key(8, "c"), isTextEditing: true))
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "60")
+        XCTAssertEqual(model.calcFeedback, "✓ 已复制 60")
+        XCTAssertEqual(model.inputText, "12*(8-3)")
+    }
+
+    func testCalculatorPromptCancelRestoresInputAndExpression() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.updateInput("5*5")
+        model.runCommand("mkdir")
+        XCTAssertEqual(model.prompt?.command, "mkdir")
+        model.escape()
+        XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+        XCTAssertEqual(model.inputText, "5*5")
+    }
+
+    func testCalculatorPromptSubmissionRestoresInputAfterAsyncSave() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.updateInput("6*7")
+        model.runCommand("mkdir 临时")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+        XCTAssertEqual(model.inputText, "6*7")
+        XCTAssertTrue(model.document.groups.contains { $0.name == "临时" })
+    }
+
+    func testCalculatorCommandErrorsAndClearUseVisibleFeedback() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.runCommand("calc foo")
+        XCTAssertEqual(model.calcFeedback, "✗ 用法：:calc 打开计算器，:calc clear 清空。")
+        model.updateInput("1+1")
+        model.submitCalc()
+        model.runCommand("calc clear")
+        XCTAssertEqual(model.calcFeedback, "✓ 计算器已清空")
+        XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+        XCTAssertEqual(model.inputText, "")
+    }
+
+    func testCalculatorClearAndCommandRoundTripRestoreExpression() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.updateInput("3*4")
+        model.submitCalc()
+        XCTAssertEqual(model.calcHistory.count, 1)
+        model.runCommand("calc clear")
+        XCTAssertTrue(model.calcHistory.isEmpty)
+        XCTAssertEqual(model.calcExpression, "")
+        XCTAssertEqual(model.inputText, "")
+        XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+
+        model.updateInput("5*5")
+        XCTAssertTrue(model.handleKey(try key(41, ":"), isTextEditing: true))
+        XCTAssertEqual(model.inputKind, .command)
+        model.updateInput("log")
+        model.escape()
+        XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+        XCTAssertEqual(model.inputText, "5*5")
+
+        XCTAssertTrue(model.handleKey(try key(41, ":"), isTextEditing: true))
+        model.updateInput("help")
+        model.submitInput()
+        XCTAssertEqual(model.buffer, .help)
+        XCTAssertNil(model.inputKind)
+    }
+
     func testClearOnlyRemovesLogsAndQuitInvokesApplicationCallback() async throws {
         let document = fixture(count: 1)
         let model = try await makeModel(document)

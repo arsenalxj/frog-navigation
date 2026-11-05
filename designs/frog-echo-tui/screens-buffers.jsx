@@ -202,6 +202,78 @@ function bvLog(ctx) {
   );
 }
 
+/* ================= 计算器缓冲区 ================= */
+
+function bvCalc(ctx) {
+  const { s, act } = ctx;
+  const X = BV.x + 32;
+  const RIGHT = BV.x + BV.w - 32;
+  const calc = s.calc;
+  const expr = calc.expr.trim();
+  const error = calc.error && calc.error.expr === expr ? calc.error : null;
+  const trial = expr && !error ? frogCalcTry(expr) : null;
+  const value = trial && trial.ok ? frogCalcFormat(trial.value) : null;
+  const capacity = CALC_VISIBLE_ROWS;
+  const start = Math.min(Math.max(0, calc.offset || 0), Math.max(0, calc.history.length - capacity));
+  const history = calc.history.slice(start, start + capacity);
+  const resultY = BV.bodyTop + 30;
+
+  return (
+    <g onClick={() => act.focusInput()} style={{ cursor: "text" }}>
+      {bvTitle(ctx, "calc", `${calc.history.length} 条历史 · Esc 关闭`)}
+
+      <g data-calc-result={value != null ? "value" : error ? "error" : expr ? "pending" : "empty"}>
+        {value != null ? (
+          <T x={X} y={resultY} size={40} weight={700} fill={COLOR.green}
+             style={{ fontVariantNumeric: "tabular-nums" }}>{truncate(value, 40, RIGHT - X)}</T>
+        ) : error ? (
+          <T x={X} y={resultY - 6} size={15} weight={600} fill={COLOR.red}>✗ {error.message}</T>
+        ) : expr ? (
+          <T x={X} y={resultY} size={34} weight={700} fill={COLOR.line}>…</T>
+        ) : (
+          <T x={X} y={resultY - 4} size={14} fill={COLOR.muted}>输入算式后按 Enter 计算</T>
+        )}
+      </g>
+
+      <L x1={X} y1={BV.bodyTop + 84} x2={RIGHT} y2={BV.bodyTop + 84} stroke={COLOR.line} />
+      <T x={X} y={BV.bodyTop + 108} size={10.5} fill={COLOR.muted} spacing={1.6}>
+        {`HISTORY · ${calc.history.length} 条`}
+      </T>
+      <T x={RIGHT} y={BV.bodyTop + 108} size={10.5} anchor="end" fill={COLOR.muted}>
+        ↑↓ 选择 · 点击载入 · c 复制结果
+      </T>
+
+      {history.length ? history.map((entry, i) => {
+        const index = start + i;
+        const y = BV.bodyTop + 132 + i * 26;
+        const sel = calc.histIndex === index;
+        const exprMax = RIGHT - X - 130 - textW(entry.value, 13) - 24;
+        return (
+          <g key={entry.id} data-calc-row={entry.expr} data-selected={sel ? "true" : "false"}
+             onClick={(e) => { e.stopPropagation(); act.calcUse(entry.id); }}
+             style={{ cursor: "pointer" }}>
+            <R x={X - 8} y={y - 11} w={RIGHT - X + 16} h={22} fill="transparent" />
+            {sel && <R x={X - 8} y={y - 11} w={RIGHT - X + 16} h={22} fill={COLOR.ink} />}
+            {sel && <R x={X - 8} y={y - 11} w={3} h={22} fill={COLOR.yellow} />}
+            <T x={X} y={y} size={10} fill={sel ? COLOR.yellow : COLOR.muted}>{String(index + 1).padStart(2, "0")}</T>
+            <T x={X + 28} y={y} size={11} fill={sel ? COLOR.mint : COLOR.muted}>{entry.time}</T>
+            <T x={X + 100} y={y} size={12.5} fill={sel ? COLOR.paper : COLOR.ink}>
+              {truncate(entry.expr, 12.5, Math.max(80, exprMax))}
+            </T>
+            <T x={RIGHT} y={y} size={13} weight={600} anchor="end" fill={sel ? COLOR.mint : COLOR.green}>
+              {entry.value}
+            </T>
+          </g>
+        );
+      }) : null}
+
+      <T x={X} y={BV.y + BV.h - 10} size={10} fill={COLOR.muted}>
+        支持 + - * / 与括号 · 结果保留 12 位有效数字 · 历史最多 50 条，重复算式只保留最新一条
+      </T>
+    </g>
+  );
+}
+
 /* ================= 任务输出缓冲区 ================= */
 
 function bvJob(ctx) {
@@ -408,6 +480,7 @@ function renderBuffer(ctx) {
     case "log": return bvLog(ctx);
     case "job": return bvJob(ctx);
     case "atlas": return bvAtlas(ctx);
+    case "calc": return bvCalc(ctx);
     default: return null;
   }
 }

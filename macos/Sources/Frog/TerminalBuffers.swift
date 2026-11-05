@@ -12,6 +12,7 @@ extension LauncherView {
         case .help: hint = "Esc 返回 · : 输入命令"
         case .log: hint = ":clear 清空 · Esc 返回"
         case .job: hint = "Esc 返回 · :log 查看日志"
+        case .calc: hint = "\(model.calcHistory.count) 条历史 · Esc 关闭"
         }
         D.text(hint, 1400, 36, size: 10.5, color: D.muted, align: .right)
         D.rule(40, 50, 1360)
@@ -20,6 +21,7 @@ extension LauncherView {
         case .help: drawHelp()
         case .log: drawLog()
         case .job: drawJob()
+        case .calc: drawCalc()
         }
     }
 
@@ -68,7 +70,7 @@ extension LauncherView {
         D.text("frog [command] · j/k 选择 · : 命令 · / 搜索", 340, 114, size: 12)
         D.text("COMMANDS", 64, 148, size: 12, color: D.green, bold: true)
         let start = min(max(0, model.bufferOffset), model.commands.count)
-        let end = min(model.commands.count, start + 20)
+        let end = min(model.commands.count, start + 21)
         for index in start..<end {
             let command = model.commands[index]
             let y = 172 + CGFloat(index - start) * 20
@@ -97,7 +99,8 @@ extension LauncherView {
             ("edit url", "修改当前书签网址"),
             ("delete", "命令行 y/N 确认删除"),
             ("set corner right-up", "修改屏幕触角"),
-            ("backup", "输入备份文件路径，导出 JSON")
+            ("backup", "输入备份文件路径，导出 JSON"),
+            ("calc", "打开计算器；c 复制结果")
         ]
         for (index, example) in examples.enumerated() {
             let y = 626 + CGFloat(index) * 17
@@ -124,6 +127,56 @@ extension LauncherView {
             hit(NSRect(x: 72, y: y - 10, width: 1328, height: 20), line.time + " " + line.text)
         }
         bufferPosition(start: start, end: end, count: model.logs.count)
+    }
+
+    private func drawCalc() {
+        typealias D = TerminalDrawing
+        let left: CGFloat = 72
+        let right: CGFloat = 1368
+        let resultY: CGFloat = 114
+        let expression = model.calcExpression.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let error = model.calcError {
+            D.text("✗ " + error, left, resultY - 6, size: 15, color: D.red, bold: true, maxWidth: right - left)
+            hit(NSRect(x: left, y: 84, width: right - left, height: 64), "无法计算：\(error)")
+        } else if expression.isEmpty {
+            D.text("输入算式后按 Enter 计算", left, resultY - 4, size: 14, color: D.muted)
+        } else if let value = try? TerminalCalculator.evaluate(expression) {
+            let text = TerminalCalculator.format(value)
+            D.text(text, left, resultY, size: 40, color: D.green, bold: true, maxWidth: right - left)
+            hit(NSRect(x: left, y: 84, width: right - left, height: 64), "结果 \(text)")
+        } else {
+            D.text("…", left, resultY, size: 34, color: D.line, bold: true)
+        }
+
+        D.rule(left, 168, right - left)
+        D.text("HISTORY · \(model.calcHistory.count) 条", left, 192, size: 10.5, color: D.muted)
+        D.text("↑↓ 选择 · 点击载入 · c 复制结果", right, 192, size: 10.5, color: D.muted, align: .right)
+
+        let capacity = LauncherModel.calcVisibleRows
+        let start = min(max(0, model.bufferOffset), model.calcHistory.count)
+        let end = min(model.calcHistory.count, start + capacity)
+        guard start < end else { return }
+        for index in start..<end {
+            let entry = model.calcHistory[index]
+            let y = 216 + CGFloat(index - start) * 26
+            let selected = model.calcHistoryIndex == index
+            if selected {
+                D.rect(NSRect(x: left - 8, y: y - 11, width: right - left + 16, height: 22), D.ink)
+                D.rect(NSRect(x: left - 8, y: y - 11, width: 3, height: 22), D.yellow)
+            }
+            D.text(String(format: "%02d", index + 1), left, y, size: 10, color: selected ? D.yellow : D.muted)
+            D.text(entry.time, left + 28, y, size: 11, color: selected ? D.mint : D.muted)
+            let valueWidth = D.width(entry.value, size: 13, bold: true)
+            let expressionWidth = max(80, right - left - 130 - valueWidth - 24)
+            D.text(entry.expression, left + 100, y, size: 12.5,
+                   color: selected ? D.paper : D.ink, maxWidth: expressionWidth)
+            D.text(entry.value, right, y, size: 13, color: selected ? D.mint : D.green,
+                   bold: true, align: .right)
+            hit(NSRect(x: left - 8, y: y - 11, width: right - left + 16, height: 22),
+                "\(entry.expression) = \(entry.value)", .calcRow(index), selected: selected)
+        }
+        bufferPosition(start: start, end: end, count: model.calcHistory.count)
     }
 
     private func drawJob() {

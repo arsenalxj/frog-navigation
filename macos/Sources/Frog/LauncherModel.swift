@@ -30,6 +30,12 @@ final class LauncherModel: ObservableObject {
     @Published var job: TerminalJob?
     @Published var settingsRows: [TerminalSettingRow] = []
     @Published var flashSetting: String?
+    @Published var calcExpression = ""
+    @Published var calcHistory: [TerminalCalcEntry] = []
+    @Published var calcHistoryIndex: Int?
+    @Published var calcError: String?
+    @Published var calcFeedback: String?
+    @Published var calcFeedbackLevel: TerminalLevel = .success
     let commands = LauncherModel.commandDirectory
 
     var dismissWindow: (() -> Void)?
@@ -37,7 +43,8 @@ final class LauncherModel: ObservableObject {
     var document: BookmarkDocument { store.document }
     var visibleRowCount: Int { 19 }
     var isTextInputActive: Bool {
-        inputKind == .command || inputKind == .search || (inputKind == .prompt && prompt?.acceptsText == true)
+        inputKind == .command || inputKind == .search || inputKind == .calc
+            || (inputKind == .prompt && prompt?.acceptsText == true)
     }
     var modeLabel: String {
         if prompt != nil { return "PROMPT" }
@@ -64,6 +71,8 @@ final class LauncherModel: ObservableObject {
     var completionTask: Task<Void, Never>?
     var completionGeneration = 0
     var flashTask: Task<Void, Never>?
+    var calcSequence = 0
+    var calcFeedbackTask: Task<Void, Never>?
     var history: [String] = []
     var historyIndex: Int?
     var historyDraft = ""
@@ -75,7 +84,8 @@ final class LauncherModel: ObservableObject {
     var lastDirectory: URL
     private let defaults: UserDefaults?
     static let expandedDefaultsKey = "frog.expandedGroupIDs"
-    private let clockFormatter: DateFormatter = {
+    static let calcVisibleRows = 16
+    let clockFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         return formatter
@@ -137,6 +147,7 @@ final class LauncherModel: ObservableObject {
         }
         if let issue = store.issue, issue != lastIssue { appendLog(issue, .error) }
         lastIssue = store.issue
+        if !busy { restoreCalcInputIfNeeded() }
     }
 
     func rebuildItems(selecting id: String? = nil) {
@@ -229,6 +240,15 @@ final class LauncherModel: ObservableObject {
 
     func updateInput(_ value: String) {
         guard isTextInputActive, !operationActive else { return }
+        if inputKind == .calc {
+            let filtered = TerminalCalculator.filtered(value)
+            inputText = filtered
+            calcExpression = filtered
+            calcHistoryIndex = nil
+            calcError = nil
+            setCalcFeedback(nil)
+            return
+        }
         inputText = value
         if inputKind == .search {
             query = value
@@ -274,6 +294,7 @@ final class LauncherModel: ObservableObject {
 
     func openBuffer(_ buffer: TerminalBuffer) {
         guard prompt == nil, !busy else { return }
+        if buffer == .calc { openCalc(); return }
         self.buffer = buffer
         bufferOffset = 0
         inputKind = nil
@@ -310,13 +331,15 @@ final class LauncherModel: ObservableObject {
             case .help: count = commands.count
             case .log: count = logs.count
             case .job: count = job?.lines.count ?? 0
+            case .calc: count = calcHistory.count
             }
             let capacity: Int
             switch buffer {
             case .settings: capacity = 31
-            case .help: capacity = 20
+            case .help: capacity = 21
             case .log: capacity = 32
             case .job: capacity = 25
+            case .calc: capacity = Self.calcVisibleRows
             }
             bufferOffset = min(max(0, bufferOffset + rows), max(0, count - capacity))
         } else {
@@ -330,6 +353,14 @@ final class LauncherModel: ObservableObject {
         if prompt != nil {
             if prompt?.command == "hotkey" { hotKey?.cancelRecording() }
             finishPrompt()
+        } else if buffer == .calc, inputKind == .command {
+            setInput(.calc, text: calcExpression)
+        } else if buffer == .calc, inputKind == nil {
+            setInput(.calc, text: calcExpression)
+        } else if inputKind == .calc {
+            inputKind = nil
+            buffer = nil
+            bufferOffset = 0
         } else if inputKind != nil {
             if inputKind == .search { query = ""; selectedIndex = 0; scrollIndex = 0; rebuildItems(selecting: "__reset__") }
             inputKind = nil
@@ -358,6 +389,8 @@ final class LauncherModel: ObservableObject {
             if !prompt.acceptsText {
                 if prompt.command != "hotkey" { finishPrompt() }
             } else { submitPrompt() }
+        } else if inputKind == .calc {
+            submitCalc()
         } else if inputKind == .command {
             let command = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
             inputKind = nil
@@ -490,6 +523,7 @@ final class LauncherModel: ObservableObject {
             operationActive = false
             busy = store.isBusy
             rebuildSettings()
+            restoreCalcInputIfNeeded()
         }
     }
 
@@ -518,6 +552,9 @@ final class LauncherModel: ObservableObject {
         }
         if modifiers.contains(.control) || modifiers.contains(.option) { return false }
         if event.keyCode == 53 { escape(); return true }
+        if buffer == .calc, inputKind == .calc {
+            return handleCalcKey(event, characters: event.characters ?? "")
+        }
         if let prompt {
             if prompt.command == "hotkey" { return false }
             if !prompt.acceptsText {

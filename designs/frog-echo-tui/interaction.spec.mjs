@@ -675,3 +675,276 @@ test('单列表：命令行字段中的数字正常输入，不作为导航键',
   await replaceText(page, '1234567890');
   await expectPrompt(page, 'add', 'title');
 });
+
+async function openCalc(page) {
+  await page.keyboard.press(':');
+  await replaceText(page, 'calc');
+  await page.keyboard.press('Enter');
+  await expect(svgText(page, '[calc]')).toBeVisible();
+  await expect(input(page)).toBeFocused();
+}
+
+test('计算器：:calc 打开，四则运算与小括号实时求值并可写入历史', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('2+3*4');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('14');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="2+3*4"]')).toContainText('14');
+  await replaceText(page, '(2+3)*4');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('20');
+  await page.keyboard.press('=');
+  await expect(page.locator('[data-calc-row="(2+3)*4"]')).toContainText('20');
+  await expect(page.locator('[data-calc-row]')).toHaveCount(2);
+  await expect(input(page)).toHaveValue('(2+3)*4');
+});
+
+test('计算器：除法消除浮点尾差，除以 0 只提示不写入历史', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('0.1+0.2');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('0.3');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="0.1+0.2"]')).toContainText('0.3');
+  await replaceText(page, '1/0');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-result="error"]')).toHaveText('✗ 不能除以 0');
+  await expect(page.locator('[data-calc-row="1/0"]')).toHaveCount(0);
+  await expect(input(page)).toHaveValue('1/0');
+  await page.keyboard.press('Backspace');
+  await expect(page.locator('[data-calc-result="pending"]')).toBeVisible();
+});
+
+test('计算器：字母不进入算式，↑↓ 按列表顺序切换历史', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('7*6');
+  await page.keyboard.press('Enter');
+  await replaceText(page, '9*9');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="9*9"]')).toContainText('81');
+  await expect(page.locator('[data-calc-row="7*6"]')).toContainText('42');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('');
+  await page.keyboard.type('am');
+  await expect(input(page)).toHaveValue('');
+  await expect(svgText(page, '[calc]')).toBeVisible();
+  await page.keyboard.press('ArrowUp');
+  await expect(input(page)).toHaveValue('9*9');
+  await expect(page.locator('[data-calc-row="9*9"]')).toHaveAttribute('data-selected', 'true');
+  await page.keyboard.press('ArrowDown');
+  await expect(input(page)).toHaveValue('7*6');
+  await expect(page.locator('[data-calc-row="7*6"]')).toHaveAttribute('data-selected', 'true');
+  await page.keyboard.press('ArrowUp');
+  await expect(input(page)).toHaveValue('9*9');
+  await expect(page.locator('[data-calc-row="9*9"]')).toHaveAttribute('data-selected', 'true');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await expect(input(page)).toHaveValue('7*6');
+  await expect(page.locator('[data-calc-row="7*6"]')).toHaveAttribute('data-selected', 'true');
+});
+
+test('计算器：点击历史行保持选中，方向键上下切换并可复制该条结果', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+  await openCalc(page);
+  await page.keyboard.type('12*(8-3)');
+  await page.keyboard.press('Enter');
+  await replaceText(page, '7*6');
+  await page.keyboard.press('Enter');
+  await page.locator('[data-calc-row="12*(8-3)"]').click();
+  await expect(page.locator('[data-calc-row="12*(8-3)"]')).toHaveAttribute('data-selected', 'true');
+  await page.keyboard.press('ArrowUp');
+  await expect(input(page)).toHaveValue('7*6');
+  await expect(page.locator('[data-calc-row="7*6"]')).toHaveAttribute('data-selected', 'true');
+  await page.keyboard.press('ArrowDown');
+  await expect(input(page)).toHaveValue('12*(8-3)');
+  await page.keyboard.press('c');
+  await expect(page.locator('svg text').filter({ hasText: /^✓ 已复制 60$/ })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('60');
+});
+
+test('计算器：Esc 关闭后再次 :calc 保留算式与历史', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('12*(8-3)');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="12*(8-3)"]')).toContainText('60');
+  await page.keyboard.press('Escape');
+  await expect(svgText(page, 'GitHub')).toBeVisible();
+  await expect(svgText(page, '[calc]')).toHaveCount(0);
+  await openCalc(page);
+  await expect(input(page)).toHaveValue('12*(8-3)');
+  await expect(page.locator('[data-calc-row="12*(8-3)"]')).toContainText('60');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('60');
+});
+
+test('计算器：点击历史项载入算式，光标留在末尾', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('3+4');
+  await page.keyboard.press('Enter');
+  await replaceText(page, '9*9');
+  await page.keyboard.press('Enter');
+  await page.locator('[data-calc-row="3+4"]').click();
+  await expect(input(page)).toHaveValue('3+4');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('3+');
+});
+
+test('计算器：指数结果可回填，超长算式受长度限制', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('1e-7');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('1e-7');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="1e-7"]')).toContainText('1e-7');
+  await replaceText(page, '2e+3');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('2000');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="2e+3"]')).toContainText('2000');
+  await replaceText(page, '');
+  await page.keyboard.insertText('('.repeat(300));
+  await expect.poll(async () => (await input(page).inputValue()).length).toBe(256);
+});
+
+test('计算器：历史超过可视行数后方向键自动滚动选中项', async ({ page }) => {
+  await openCalc(page);
+  for (let i = 1; i <= 17; i++) {
+    await replaceText(page, `1+${i}`);
+    await page.keyboard.press('Enter');
+  }
+  for (let i = 0; i < 17; i++) await page.keyboard.press('ArrowDown');
+  await expect(input(page)).toHaveValue('1+1');
+  await expect(page.locator('[data-calc-row="1+1"]')).toHaveAttribute('data-selected', 'true');
+  await expect(page.locator('[data-calc-row="1+16"]')).toBeVisible();
+  await expect(page.locator('[data-calc-row="1+17"]')).toHaveCount(0);
+});
+
+test('计算器：点击不同长度历史项后光标落在末尾', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('12345+6');
+  await page.keyboard.press('Enter');
+  await replaceText(page, '1+1');
+  await page.keyboard.press('Enter');
+  await page.locator('[data-calc-row="12345+6"]').click();
+  await expect(input(page)).toHaveValue('12345+6');
+  await expect.poll(() => page.evaluate(() => document.querySelector('.ime').selectionStart)).toBe(7);
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('12345+');
+});
+
+test('计算器：:calc clear 清空算式与历史并留在计算器', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('5*5');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-calc-row="5*5"]')).toContainText('25');
+  await page.keyboard.press(':');
+  await replaceText(page, 'calc clear');
+  await page.keyboard.press('Enter');
+  await expect(svgText(page, '[calc]')).toBeVisible();
+  await expect(input(page)).toHaveValue('');
+  await expect(page.locator('[data-calc-row]')).toHaveCount(0);
+  await expect(page.locator('[data-calc-result="empty"]')).toBeVisible();
+});
+
+test('计算器：中文括号自动转成英文括号，退格可逐字删除', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.insertText('（1+2）*3');
+  await expect(input(page)).toHaveValue('(1+2)*3');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('9');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('(1+2)*');
+  await page.keyboard.insertText('）');
+  await expect(input(page)).toHaveValue('(1+2)*)');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('(1+2)*');
+});
+
+test('计算器：输入法组合提交的中文括号同样转成英文括号', async ({ page }) => {
+  await openCalc(page);
+  await page.evaluate(() => {
+    const el = document.querySelector('.ime');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    setter.call(el, '（8-3）');
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', data: '（8-3）' }));
+    el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '（8-3）' }));
+  });
+  await expect(input(page)).toHaveValue('(8-3)');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('5');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('(8-3');
+});
+
+test('计算器：点击命令行标签后仍保持焦点，退格能删除括号', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('1+(2)');
+  await page.locator('svg text').filter({ hasText: /^calc › 算式$/ }).click();
+  await expect(input(page)).toBeFocused();
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('1+(2');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('1+(');
+});
+
+test('计算器：算式与结果使用等宽字体，字符步进一致', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('123.34+1+()');
+  const metrics = await page.evaluate(() => {
+    const text = [...document.querySelectorAll('svg text')].find((t) => t.textContent === '123.34+1+()');
+    const cs = getComputedStyle(text);
+    const ctx = document.createElement('canvas').getContext('2d');
+    ctx.font = `${cs.fontSize} ${cs.fontFamily}`;
+    return {
+      family: cs.fontFamily,
+      widths: ['0', '1', '8', 'M', '+', '(', ')', '.'].map((ch) => Number(ctx.measureText(ch).width.toFixed(2))),
+    };
+  });
+  expect(metrics.family).toContain('monospace');
+  expect(new Set(metrics.widths).size).toBe(1);
+  const caretWidth = await page.locator('.frog-caret').evaluate((el) => el.getBoundingClientRect().width);
+  expect(Math.abs(caretWidth - metrics.widths[0])).toBeLessThan(0.5);
+});
+
+test('计算器：按 c 复制当前结果', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+  await openCalc(page);
+  await page.keyboard.press('c');
+  await expect(page.locator('svg text').filter({ hasText: /^✗ 没有可复制的结果$/ })).toBeVisible();
+  await page.keyboard.type('12*(8-3)');
+  await page.keyboard.press('c');
+  await expect(page.locator('svg text').filter({ hasText: /^✓ 已复制 60$/ })).toBeVisible();
+  await expect(input(page)).toHaveValue('12*(8-3)');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('60');
+});
+
+test('计算器：⌘A 选区在命令行高亮，退格或输入作用于整段', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('1+2*3');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(page.locator('svg rect[fill="#E6C24D"][opacity="0.4"]')).toBeVisible();
+  await page.keyboard.type('4+5');
+  await expect(input(page)).toHaveValue('4+5');
+  await expect(page.locator('[data-calc-result="value"]')).toHaveText('9');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('');
+});
+
+test('计算器：方向键移动可见光标，可在中间插入和删除', async ({ page }) => {
+  await openCalc(page);
+  await page.keyboard.type('1+(2)');
+  const caret = page.locator('.frog-caret');
+  const before = (await caret.boundingBox()).x;
+  await page.keyboard.press('ArrowLeft');
+  await expect.poll(async () => (await caret.boundingBox()).x < before).toBe(true);
+  const middle = (await caret.boundingBox()).x;
+  await page.keyboard.press('ArrowLeft');
+  await expect.poll(async () => (await caret.boundingBox()).x < middle).toBe(true);
+  await page.keyboard.type('9');
+  await expect(input(page)).toHaveValue('1+(92)');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('1+(2)');
+  await page.keyboard.press('Home');
+  await page.keyboard.type('0+');
+  await expect(input(page)).toHaveValue('0+1+(2)');
+  await page.keyboard.press('End');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('Backspace');
+  await expect(input(page)).toHaveValue('0+1+()');
+});

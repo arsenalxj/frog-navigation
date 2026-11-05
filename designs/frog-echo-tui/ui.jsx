@@ -55,8 +55,8 @@ function L({ x1, y1, x2, y2, stroke = COLOR.line, sw = 1, dash, opacity = 1 }) {
                strokeDasharray={dash} opacity={opacity} />;
 }
 
-function Caret({ x, y, h = 16, color = COLOR.amber }) {
-  return <rect className="frog-caret" x={x} y={y - h / 2} width={7} height={h} fill={color} />;
+function Caret({ x, y, h = 16, w = 7, color = COLOR.amber }) {
+  return <rect className="frog-caret" x={x} y={y - h / 2} width={w} height={h} fill={color} />;
 }
 
 function Kbd({ x, y, label, size = TYPE.sm, dark = false }) {
@@ -132,29 +132,51 @@ function CommandChrome({ s, act }) {
       text: input.kind === "search" ? "Enter 打开 · Esc 清空" : "Tab 补全 · ↑↓ 历史 · Esc 取消",
       kind: "info",
     };
+  } else if (s.buffer === "calc") {
+    promptChar = "=";
+    promptColor = COLOR.green;
+    label = "calc › 算式";
+    value = s.calc.expr;
+    right = s.calc.copied
+      ? { text: s.calc.copied, kind: s.calc.copied.startsWith("✓") ? "ok" : "error" }
+      : { text: "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭", kind: "info" };
   }
-  const placeholder = !p && !input
+  const placeholder = !p && !input && s.buffer !== "calc"
     ? s.buffer === "settings" ? ": 输入命令 · :help 查看帮助" : ": 打开命令 · / 搜索 · ? 帮助"
     : null;
   const inputX = x + LAYOUT.margin + 18 + (label ? textW(label, 13) + 12 : 0);
+  const calcMode = !p && !input && s.buffer === "calc";
+  const selStart = calcMode ? Math.min(s.calc.caret ?? value.length, value.length) : value.length;
+  const selEnd = calcMode
+    ? Math.min(Math.max(selStart, s.calc.selectionEnd ?? selStart), value.length)
+    : selStart;
 
   return (
-    <g>
+    <g onClick={() => act.focusInput()} style={{ cursor: "text" }}>
+      {/* 整条命令行都是回焦命中区，点标签或提示文字也不会丢失输入焦点。 */}
+      <R x={x} y={y} w={w} h={LAYOUT.cmd.h} fill="transparent" />
       {p && <R x={x} y={y} w={w} h={LAYOUT.cmd.h} fill={COLOR.surface} opacity={0.7} />}
       {p && <R x={x} y={y} w={3} h={LAYOUT.cmd.h} fill={COLOR.yellow} />}
       <L x1={x} y1={y} x2={x + w} y2={y} stroke={COLOR.line} />
       <T x={x + LAYOUT.margin} y={y + 21} size={17} weight={700} fill={promptColor}>{promptChar}</T>
       {label && <T x={x + LAYOUT.margin + 18} y={y + 21} size={13} fill={COLOR.muted}>{label}</T>}
-      <g onClick={() => act.focusInput()} style={{ cursor: "text" }}>
-        <T x={inputX} y={y + 21} size={15.5} fill={COLOR.ink}>{value}</T>
-        {caret && <Caret x={inputX + 2 + textW(value, 15.5)} y={y + 21} h={18} />}
+      <g>
+        {selEnd > selStart && (
+          <R x={inputX + textW(value.slice(0, selStart), 15.5)} y={y + 10}
+             w={Math.max(1, textW(value.slice(selStart, selEnd), 15.5))} h={22}
+             fill={COLOR.yellow} opacity={0.4} />
+        )}
+        <T x={inputX} y={y + 21} size={15.5} fill={COLOR.ink}
+           style={calcMode ? { fontVariantNumeric: "tabular-nums" } : undefined}>{value}</T>
+        {caret && <Caret x={inputX + textW(value.slice(0, selStart), 15.5)} y={y + 21} h={18}
+                         w={calcMode ? textW("0", 15.5) : 7} />}
         {placeholder && (
           <T x={inputX + 16} y={y + 21} size={14} fill={COLOR.muted} opacity={0.8}>{placeholder}</T>
         )}
       </g>
       {right && (
         <T x={x + w - LAYOUT.margin} y={y + 21} size={12} anchor="end"
-           fill={right.kind === "error" ? COLOR.red : COLOR.muted}>{right.text}</T>
+           fill={right.kind === "error" ? COLOR.red : right.kind === "ok" ? COLOR.green : COLOR.muted}>{right.text}</T>
       )}
     </g>
   );
@@ -177,13 +199,15 @@ function StatusChrome({ s, ctx }) {
     <g>
       <R x={x} y={y} w={w} h={h} fill={COLOR.forest} />
       <T x={x + LAYOUT.margin} y={y + 19.5} size={12.5} weight={700} fill={COLOR.yellow} spacing={1.2}>{mode}</T>
-      {s.buffer !== "settings" && (
+      {s.buffer !== "settings" && s.buffer !== "calc" && (
         <T x={x + LAYOUT.margin - 16 + modeW} y={y + 19.5} size={12.5} fill={COLOR.paper} opacity={0.82}>
           · {s.query ? `“${s.query}”` : ctx.folderName} · {pos}
         </T>
       )}
       <T x={x + w - LAYOUT.margin} y={y + 19.5} size={12} anchor="end" fill={COLOR.mint} opacity={0.9}>
-        {s.buffer === "settings" ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · F1 地图 · ? 帮助"}
+        {s.buffer === "settings" ? ":set <key> <value> · :help 帮助 · Esc 返回"
+          : s.buffer === "calc" ? ": 命令 · Esc 关闭并保留算式"
+          : ": 命令 · F1 地图 · ? 帮助"}
       </T>
     </g>
   );
