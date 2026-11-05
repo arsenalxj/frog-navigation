@@ -21,9 +21,5 @@
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHumanReadableCopyright</key><string>Copyright © 2026 青蛙导航</string>
     <key>NSAppleEventsUsageDescription</key><string>读取 Finder 最后活动的文件夹，让文件选择窗口快速前往该目录。</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key><true/>
-    </dict>
 </dict>
 </plist>

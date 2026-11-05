@@ -1,7 +1,6 @@
 import AppKit
 import XCTest
 import FrogCore
-import FrogIcons
 @testable import Frog
 
 @MainActor
@@ -14,16 +13,19 @@ final class LauncherModelTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeModel(_ document: BookmarkDocument = BookmarkDocument()) async throws -> LauncherModel {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Frog-UI-Tests-" + UUID().uuidString)
+    private func directory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Frog-Terminal-Tests-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         directories.append(directory)
+        return directory
+    }
+
+    private func makeModel(_ document: BookmarkDocument = BookmarkDocument()) async throws -> LauncherModel {
+        let directory = try directory()
         try document.encoded().write(to: directory.appendingPathComponent("bookmarks.json"))
         let store = BookmarkStore(directoryOverride: directory, persistDirectory: false)
         await store.load()
-        let model = LauncherModel(store: store, icons: IconStore(cacheDirectory: directory.appendingPathComponent("cache"), networkingEnabled: false), isolated: true)
-        model.reduceMotion = true
-        return model
+        return LauncherModel(store: store, isolated: true)
     }
 
     private func fixture(count: Int) -> BookmarkDocument {
@@ -36,426 +38,767 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertTrue(condition(), "异步操作未在时限内完成")
     }
 
-    func testRootPaginationUsesFullCapacityWithoutVirtualItems() async throws {
-        let document = fixture(count: 50)
-        let model = try await makeModel(document)
-        XCTAssertEqual(model.rootPages[0].count, model.metrics.capacity)
-        XCTAssertEqual(model.rootPages[0].last?.id, document.bookmarks[model.metrics.capacity - 1].id)
-        XCTAssertFalse(model.rootPages.joined().contains(.add))
-        XCTAssertTrue(model.rootPages.joined().allSatisfy(\.movable))
-        XCTAssertEqual(model.rootPages.flatMap { $0 }.filter { $0.movable }.count, 50)
-        let exported = try BookmarkDocument.decode(model.document.encoded())
-        XCTAssertEqual(exported, document)
-        let empty = try await makeModel()
-        XCTAssertEqual(empty.rootPages, [[]])
-        XCTAssertTrue(empty.activeItems.isEmpty)
-        empty.addBookmark()
-        XCTAssertTrue(empty.showEditor)
-        XCTAssertEqual(empty.draft.location, "__root__")
+    private func saved(_ model: LauncherModel) throws -> BookmarkDocument {
+        try BookmarkDocument.decode(Data(contentsOf: model.store.directory.appendingPathComponent("bookmarks.json")))
     }
 
-    func testFolderKeepsAddEntryAndAddingUsesCurrentLocation() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let model = try await makeModel(BookmarkDocument(groups: [group]))
-        model.folderID = group.id
-        XCTAssertEqual(model.folderPages, [[.add]])
-        model.addBookmark()
-        XCTAssertEqual(model.draft.location, group.id)
-        model.showEditor = false; model.draft = BookmarkDraft(); model.folderID = nil
-        model.query = "没有匹配的搜索"
-        model.addBookmark()
-        XCTAssertTrue(model.showEditor)
-        XCTAssertEqual(model.draft.location, "__root__")
-    }
-
-    func testSavingFillsLastRootSlotBeforeRevealingNextPage() async throws {
-        let model = try await makeModel()
-        let count = model.metrics.capacity - 1
-        try await model.store.apply { $0 = self.fixture(count: count) }
-        model.draft = BookmarkDraft(url: "example.org/last", title: "本页最后一个")
-        model.saveDraft()
-        try await settle { !model.savingDraft }
-        XCTAssertEqual(model.rootPage, 0)
-        XCTAssertEqual(model.rootPages.count, 1)
-        XCTAssertEqual(model.activeItems.last?.id, model.selection)
-        model.draft = BookmarkDraft(url: "example.org/next", title: "下一页第一个")
-        model.saveDraft()
-        try await settle { !model.savingDraft }
-        XCTAssertEqual(model.rootPage, 1)
-        XCTAssertEqual(model.rootPages.count, 2)
-        XCTAssertEqual(model.activeItems.first?.id, model.selection)
-    }
-
-    func testEscapeHandlesOneLayerAndPreservesDraft() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let model = try await makeModel(BookmarkDocument(groups: [group]))
-        model.folderID = group.id; model.query = "example"; model.editing = true
-        model.showSettings = true; model.showEditor = true
-        model.draft.title = "未保存草稿"
-        var hidden = false
-        model.dismissWindow = { hidden = true }
-        model.escape()
-        XCTAssertFalse(model.showEditor); XCTAssertTrue(model.showSettings)
-        XCTAssertEqual(model.draft.title, "未保存草稿")
-        model.escape(); XCTAssertFalse(model.showSettings); XCTAssertTrue(model.editing)
-        model.escape(); XCTAssertFalse(model.editing); XCTAssertEqual(model.query, "example")
-        model.escape(); XCTAssertEqual(model.query, ""); XCTAssertEqual(model.folderID, group.id)
-        model.escape(); XCTAssertNil(model.folderID); XCTAssertFalse(hidden)
-        model.escape(); XCTAssertTrue(hidden)
-    }
-
-    func testFailedSaveKeepsDraftAndPreviousFile() async throws {
-        let model = try await makeModel(fixture(count: 2))
-        let file = model.store.directory.appendingPathComponent("bookmarks.json")
-        let previous = try Data(contentsOf: file)
-        model.draft = BookmarkDraft(url: "example.com", title: " ")
-        model.showEditor = true
-        model.saveDraft()
-        try await settle { !model.savingDraft }
-        XCTAssertTrue(model.showEditor)
-        XCTAssertEqual(model.draft.url, "example.com")
-        XCTAssertNotNil(model.draft.error)
-        XCTAssertEqual(try Data(contentsOf: file), previous)
-    }
-
-    func testSaveRejectsRepeatedSubmissionAndRevealsActualPage() async throws {
-        let model = try await makeModel(fixture(count: 40))
-        model.draft = BookmarkDraft(url: "example.org", title: "新增书签")
-        model.showEditor = true
-        model.saveDraft(); model.saveDraft()
-        try await settle { !model.savingDraft }
-        XCTAssertEqual(model.store.document.bookmarks.count, 41)
-        XCTAssertFalse(model.showEditor)
-        XCTAssertEqual(model.rootPage, 1)
-        XCTAssertTrue(model.activeItems.contains { $0.id == model.selection })
-        XCTAssertEqual(model.store.document.bookmarks.last?.url, "https://example.org")
-    }
-
-    func testNewFolderSaveNavigatesIntoFolder() async throws {
-        let model = try await makeModel()
-        model.draft = BookmarkDraft(url: "example.com", title: "工作台", location: "__new__", newFolderName: "工作")
-        model.saveDraft()
-        try await settle { !model.savingDraft }
-        XCTAssertEqual(model.store.document.groups.count, 1)
-        XCTAssertEqual(model.folderID, model.store.document.groups[0].id)
-        XCTAssertEqual(model.activeItems.filter { $0.movable }.count, 1)
-    }
-
-    func testDragReorderIsPreviewOnlyUntilDropAndEscapeCancels() async throws {
-        let document = fixture(count: 2)
-        let model = try await makeModel(document)
-        let file = model.store.directory.appendingPathComponent("bookmarks.json")
-        let previous = try Data(contentsOf: file)
-        model.frames["root::\(document.bookmarks[1].id)"] = CGRect(x: 200, y: 100, width: 120, height: 150)
-        model.drag(.bookmark(document.bookmarks[0]), point: CGPoint(x: 310, y: 200))
-        XCTAssertEqual(model.document.rootItems.map(\.id), [document.bookmarks[1].id, document.bookmarks[0].id])
-        XCTAssertEqual(try Data(contentsOf: file), previous)
-        model.escape()
-        XCTAssertNil(model.dragItem)
-        XCTAssertEqual(model.document, document)
-        XCTAssertEqual(try Data(contentsOf: file), previous)
-    }
-
-    func testDroppedReorderPersistsExactlyOnce() async throws {
-        let document = fixture(count: 2)
-        let model = try await makeModel(document)
-        let point = CGPoint(x: 310, y: 200)
-        model.frames["root::\(document.bookmarks[1].id)"] = CGRect(x: 200, y: 100, width: 120, height: 150)
-        model.drag(.bookmark(document.bookmarks[0]), point: point)
-        model.finishDrag(point: point)
-        try await settle { model.store.document.rootItems.first?.id == document.bookmarks[1].id }
-        let saved = try BookmarkDocument.decode(Data(contentsOf: model.store.directory.appendingPathComponent("bookmarks.json")))
-        XCTAssertEqual(saved.rootItems.map(\.id), [document.bookmarks[1].id, document.bookmarks[0].id])
-        model.finishDrag(point: point)
-        XCTAssertEqual(model.store.document, saved)
-    }
-
-    func testCrossPageDropOnBlankAppendsAfterThatPage() async throws {
-        let document = fixture(count: 40)
-        let model = try await makeModel(document)
-        model.drag(.bookmark(document.bookmarks[0]), point: CGPoint(x: 300, y: 300))
-        model.setPage(1, animated: false)
-        model.frames = [:]
-        model.finishDrag(point: CGPoint(x: 900, y: 500))
-        try await settle { model.store.document.rootItems.last?.id == document.bookmarks[0].id }
-        XCTAssertEqual(model.store.document.rootItems.last?.id, document.bookmarks[0].id)
-    }
-
-    func testHideResetsNavigationButKeepsDraftAndRootPage() async throws {
-        let model = try await makeModel(fixture(count: 40))
-        model.rootPage = 1; model.query = "example"; model.editing = true
-        model.draft = BookmarkDraft(url: "draft.example", title: "草稿")
-        model.showEditor = true
-        model.didHide()
-        XCTAssertEqual(model.rootPage, 1)
-        XCTAssertEqual(model.query, "")
-        XCTAssertFalse(model.editing)
-        XCTAssertEqual(model.draft.title, "草稿")
-        XCTAssertTrue(model.showEditor)
-    }
-
-    func testHoverOnlyCreatesFolderAfterDwellAndSuccessfulDrop() async throws {
-        let document = fixture(count: 2)
-        let model = try await makeModel(document)
-        let point = CGPoint(x: 260, y: 130)
-        model.frames["root::\(document.bookmarks[1].id)"] = CGRect(x: 200, y: 100, width: 120, height: 150)
-        model.drag(.bookmark(document.bookmarks[0]), point: point)
-        XCTAssertNil(model.mergeTarget)
-        model.cancelDrag()
-        XCTAssertEqual(model.store.document.groups.count, 0)
-        model.drag(.bookmark(document.bookmarks[0]), point: point)
-        try await settle { model.mergeTarget == document.bookmarks[1].id }
-        XCTAssertEqual(model.store.document.groups.count, 0)
-        model.finishDrag(point: point)
-        try await settle { model.store.document.groups.count == 1 }
-        XCTAssertEqual(model.store.document.bookmarks(in: model.store.document.groups[0].id).count, 2)
-        try await settle { model.renamingID != nil }
-        XCTAssertEqual(model.renamingID, model.folderID)
-    }
-
-    func testDragOutOfFolderAndCancelRestoresMembershipAndFolder() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let bookmark = Bookmark(title: "工作台", url: "https://example.com", groupId: group.id)
-        let document = BookmarkDocument(groups: [group], bookmarks: [bookmark])
-        let model = try await makeModel(document)
-        model.folderID = group.id
-        model.folderFrame = CGRect(x: 400, y: 200, width: 620, height: 500)
-        model.drag(.bookmark(bookmark), point: CGPoint(x: 200, y: 300))
-        XCTAssertNil(model.folderID)
-        XCTAssertNil(model.document.bookmarks[0].groupId)
-        XCTAssertEqual(model.store.document.bookmarks[0].groupId, group.id)
-        model.cancelDrag()
-        XCTAssertEqual(model.folderID, group.id)
-        XCTAssertEqual(model.document, document)
-    }
-
-    func testExternalReloadKeepsEditorDraft() async throws {
-        let model = try await makeModel(fixture(count: 2))
-        model.draft = BookmarkDraft(url: "example.org", title: "未提交标题")
-        model.showEditor = true
-        let replacement = fixture(count: 5)
-        try replacement.encoded().write(to: model.store.directory.appendingPathComponent("bookmarks.json"), options: .atomic)
-        await model.store.reloadIfChanged()
-        XCTAssertEqual(model.store.document.bookmarks.count, 5)
-        XCTAssertEqual(model.draft.title, "未提交标题")
-        XCTAssertEqual(model.draft.url, "example.org")
-        XCTAssertTrue(model.showEditor)
-    }
-
-    func testPageWindowClampsImmediatelyWhenSearchOrDataShrinks() {
-        let window = PageWindow(requestedPage: 2, pageCount: 1)
-        XCTAssertEqual(window.current, 0)
-        XCTAssertEqual(Array(window.indices), [0])
-        XCTAssertTrue(PageWindow(requestedPage: 100, pageCount: 0).indices.isEmpty)
-        XCTAssertEqual(Array(PageWindow(requestedPage: -4, pageCount: 3).indices), [0, 1])
-    }
-
-    func testGridKeepsIconsAndDotsAboveLargeDockAndInsideSideDock() {
-        let metrics = GridMetrics(size: CGSize(width: 1440, height: 900), dockInsets: DockInsets(left: 130, right: 0, bottom: 190))
-        XCTAssertLessThanOrEqual(metrics.top + metrics.height, 900 - 190 - 49)
-        XCTAssertLessThan(metrics.dotsY, 900 - 190)
-        XCTAssertGreaterThan(metrics.centerX - metrics.width / 2, 130)
-        XCTAssertLessThan(metrics.centerX + metrics.width / 2, 1440)
-    }
-
-    func testNativePointerStartsFromHitFrameAndSuppressesDropClick() async throws {
-        let document = fixture(count: 2)
-        let model = try await makeModel(document)
-        model.visible = true
-        model.frames["root::\(document.bookmarks[0].id)"] = CGRect(x: 100, y: 100, width: 120, height: 150)
-        model.frames["root::\(document.bookmarks[1].id)"] = CGRect(x: 250, y: 100, width: 120, height: 150)
-        model.pointerDown(at: CGPoint(x: 160, y: 135))
-        XCTAssertFalse(model.pointerDragged(to: CGPoint(x: 163, y: 136)))
-        XCTAssertNil(model.dragItem)
-        XCTAssertTrue(model.pointerDragged(to: CGPoint(x: 360, y: 200)))
-        XCTAssertEqual(model.dragItem?.id, document.bookmarks[0].id)
-        XCTAssertTrue(model.pointerUp(at: CGPoint(x: 360, y: 200)))
-        model.activate(.add)
-        XCTAssertFalse(model.showEditor, "drop 同一事件不能再触发按钮点击")
-        try await settle { model.store.document.rootItems.first?.id == document.bookmarks[1].id }
-    }
-
-    func testNativePointerOrdinaryClickAndEscapeCancellation() async throws {
-        let document = fixture(count: 2)
-        let model = try await makeModel(document)
-        model.visible = true
-        model.frames["root::\(document.bookmarks[0].id)"] = CGRect(x: 100, y: 100, width: 120, height: 150)
-        model.pointerDown(at: CGPoint(x: 160, y: 135))
-        XCTAssertFalse(model.pointerUp(at: CGPoint(x: 160, y: 135)))
-        model.activate(.add)
-        XCTAssertTrue(model.showEditor)
-        model.showEditor = false
-        model.pointerDown(at: CGPoint(x: 160, y: 135))
-        XCTAssertTrue(model.pointerDragged(to: CGPoint(x: 300, y: 200)))
-        model.escape()
-        XCTAssertNil(model.dragItem)
-        XCTAssertFalse(model.pointerDragged(to: CGPoint(x: 500, y: 200)))
-        model.pointerUp(at: CGPoint(x: 500, y: 200))
-        XCTAssertEqual(model.store.document, document)
-    }
-
-    func testNativeLongPressEntersEditingWithoutOpeningFolder() async throws {
-        let folder = BookmarkGroup(name: "工作")
-        let model = try await makeModel(BookmarkDocument(groups: [folder]))
-        model.visible = true
-        model.frames["root::\(folder.id)"] = CGRect(x: 100, y: 100, width: 120, height: 150)
-        model.pointerDown(at: CGPoint(x: 160, y: 135))
-        try await settle { model.editing }
-        XCTAssertTrue(model.pointerUp(at: CGPoint(x: 160, y: 135)))
-        model.activate(.folder(folder))
-        XCTAssertNil(model.folderID)
-    }
-
-    private func key(_ code: UInt16, modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
+    private func key(_ code: UInt16, _ text: String = "", modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
         try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
                                       timestamp: 0, windowNumber: 0, context: nil,
-                                      characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code))
+                                      characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code))
     }
 
-    func testMarkedTextKeepsNativeEscapeReturnAndArrowHandling() async throws {
-        let group = BookmarkGroup(name: "工作")
+    private func select(_ id: String, in model: LauncherModel) throws {
+        model.selectItem(at: try XCTUnwrap(model.items.firstIndex { $0.id == id }))
+    }
+
+    private func choose(_ id: String, in model: LauncherModel) throws {
+        model.choosePromptOption(at: try XCTUnwrap(model.prompt?.choices.firstIndex { $0.id == id }))
+    }
+
+    private func addThroughTitle(_ model: LauncherModel, url: String = "example.org", title: String = "新增书签") {
+        model.addBookmark()
+        model.updateInput(url)
+        model.submitInput()
+        model.updateInput(title)
+        model.submitInput()
+    }
+
+    func testCachedRootAndFolderRowsHaveFixedFolderAndAddEntrances() async throws {
+        let group = BookmarkGroup(name: "工作", order: 30)
+        let root = Bookmark(title: "根书签", url: "https://www.root.example:8443/path?query=value", order: 0)
+        let child = Bookmark(title: "目录书签", url: "https://child.example", groupId: group.id)
+        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [root, child]))
+        XCTAssertEqual(model.items.map(\.kind), [.folder, .bookmark])
+        XCTAssertEqual(model.items.map(\.id), [group.id, root.id])
+        XCTAssertEqual(model.items[1].detail, "root.example:8443")
+        XCTAssertEqual(model.items[1].url, root.url)
+        XCTAssertEqual(model.visibleRowCount, 19)
+        model.activateSelection()
+        XCTAssertEqual(model.folderID, group.id)
+        XCTAssertEqual(model.items.map(\.kind), [.add, .bookmark])
+        XCTAssertEqual(model.items[1].id, child.id)
+        XCTAssertTrue(model.showBreadcrumb)
+        XCTAssertEqual(model.visibleRowCount, 18)
+        XCTAssertEqual(model.selectedIndex, 1)
+    }
+
+    func testEmptyRootHasNoVirtualRowAndFolderExposesAddAction() async throws {
+        let empty = try await makeModel()
+        XCTAssertTrue(empty.items.isEmpty)
+        empty.activateSelection()
+        XCTAssertNil(empty.prompt)
+        empty.addBookmark()
+        XCTAssertEqual(empty.prompt?.command, "add")
+        let group = BookmarkGroup(name: "空文件夹")
         let model = try await makeModel(BookmarkDocument(groups: [group]))
+        model.activateSelection()
+        model.activateSelection()
+        model.updateInput("folder.example")
+        model.submitInput()
+        model.submitInput()
+        XCTAssertEqual(model.prompt?.choices[model.prompt?.selectedChoice ?? 0].id, group.id)
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model).bookmarks.first?.groupId, group.id)
+    }
+
+    func testAddRetainsAllDraftsWhenSteppingBackwardAndCancelsWithoutWriting() async throws {
+        let model = try await makeModel()
+        let original = try saved(model)
+        addThroughTitle(model, title: "未提交标题")
+        try choose("__new__", in: model)
+        model.submitInput()
+        model.updateInput("未提交文件夹")
+        XCTAssertTrue(model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true))
+        XCTAssertEqual(model.prompt?.field, "location")
+        model.submitInput()
+        XCTAssertEqual(model.inputText, "未提交文件夹")
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "未提交标题")
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "https://example.org")
+        model.escape()
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(try saved(model), original)
+    }
+
+    func testAddNewFolderIsOneAtomicSaveAndRepeatedEnterDoesNotDuplicate() async throws {
+        let model = try await makeModel()
+        addThroughTitle(model)
+        try choose("__new__", in: model)
+        model.submitInput()
+        XCTAssertTrue(model.document.groups.isEmpty)
+        model.updateInput("新工作目录")
+        model.submitInput()
+        model.submitInput()
+        XCTAssertTrue(model.busy)
+        try await settle { !model.busy }
+        let document = try saved(model)
+        XCTAssertEqual(document.groups.count, 1)
+        XCTAssertEqual(document.bookmarks.count, 1)
+        XCTAssertEqual(document.bookmarks[0].groupId, document.groups[0].id)
+        XCTAssertNil(model.prompt)
+    }
+
+    func testAddValidationAndFailedPersistenceRetainDraftAndDiskContents() async throws {
+        let model = try await makeModel(fixture(count: 1))
+        model.addBookmark()
+        model.updateInput("not a url")
+        model.submitInput()
+        XCTAssertEqual(model.prompt?.field, "url")
+        XCTAssertNotNil(model.prompt?.error)
+        model.updateInput("new.example")
+        model.submitInput()
+        model.updateInput("保留标题")
+        model.submitInput()
+        let file = model.store.directory.appendingPathComponent("bookmarks.json")
+        let corrupted = Data("not-json".utf8)
+        try corrupted.write(to: file, options: .atomic)
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(model.prompt?.field, "location")
+        XCTAssertNotNil(model.prompt?.error)
+        XCTAssertEqual(try Data(contentsOf: file), corrupted)
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "保留标题")
+        XCTAssertEqual(model.document.bookmarks.count, 1)
+    }
+
+    func testEditSwitchesDraftFieldsWithoutSelectingOrSavingUntilEnter() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
+        try select(document.bookmarks[0].id, in: model)
+        model.runCommand("edit")
+        let revision = model.inputRevision
+        model.updateInput("新的标题")
+        XCTAssertEqual(model.inputRevision, revision)
+        XCTAssertFalse(model.handleKey(try key(51, "\u{7f}"), isTextEditing: true))
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        XCTAssertEqual(model.prompt?.field, "url")
+        XCTAssertGreaterThan(model.inputRevision, revision)
+        model.updateInput("changed.example/path")
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "新的标题")
+        XCTAssertEqual(try saved(model), document)
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model).bookmarks[0].title, "新的标题")
+        XCTAssertEqual(model.document.bookmarks[0].url, "https://changed.example/path")
+    }
+
+    func testEditValidationReturnsToInvalidFieldWithoutDiscardingOtherDraft() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
+        try select(document.bookmarks[0].id, in: model)
+        model.runCommand("edit")
+        model.updateInput("")
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        model.updateInput("new.example")
+        model.submitInput()
+        XCTAssertEqual(model.prompt?.field, "title")
+        XCTAssertNotNil(model.prompt?.error)
+        model.updateInput("修正标题")
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(model.document.bookmarks[0].url, "https://new.example")
+    }
+
+    func testFolderNamesRejectEmptyOverlongAndDuplicateWithoutDataChange() async throws {
+        let first = BookmarkGroup(name: "已有名称")
+        let second = BookmarkGroup(name: "另一个", order: 1)
+        let document = BookmarkDocument(groups: [first, second])
+        let model = try await makeModel(document)
+        model.runCommand("mkdir")
+        for value in [" ", String(repeating: "字", count: 61), first.name] {
+            model.updateInput(value)
+            model.submitInput()
+            XCTAssertNotNil(model.prompt?.error)
+            XCTAssertEqual(try saved(model), document)
+        }
+        model.escape()
+        try select(second.id, in: model)
+        model.runCommand("rename")
+        model.updateInput(first.name)
+        model.submitInput()
+        XCTAssertNotNil(model.prompt?.error)
+        XCTAssertEqual(try saved(model), document)
+        model.updateInput("有效的新名称")
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(model.document.groups.first { $0.id == second.id }?.name, "有效的新名称")
+    }
+
+    func testMoveNewFolderBackCancelAndCommitAreAtomic() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
+        try select(document.bookmarks[0].id, in: model)
+        model.runCommand("move")
+        try choose("__new__", in: model)
+        model.submitInput()
+        model.updateInput("新归属")
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        model.submitInput()
+        XCTAssertEqual(model.inputText, "新归属")
+        XCTAssertEqual(try saved(model), document)
+        model.escape()
+        XCTAssertTrue(model.document.groups.isEmpty)
+        model.runCommand("move")
+        try choose("__new__", in: model)
+        model.submitInput()
+        model.updateInput("最终归属")
+        model.submitInput()
+        try await settle { !model.busy }
+        let result = try saved(model)
+        XCTAssertEqual(result.groups.count, 1)
+        XCTAssertEqual(result.bookmarks[0].groupId, result.groups[0].id)
+    }
+
+    func testMoveFailureCannotLeaveOrphanNewFolder() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
+        try select(document.bookmarks[0].id, in: model)
+        model.runCommand("move")
+        try choose("__new__", in: model)
+        model.submitInput()
+        model.updateInput("不能成为空壳")
+        try await model.store.apply { try $0.deleteBookmark(id: document.bookmarks[0].id) }
+        try await settle { !model.busy }
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertNotNil(model.prompt?.error)
+        XCTAssertEqual(model.inputText, "不能成为空壳")
+        XCTAssertTrue(try saved(model).groups.isEmpty)
+    }
+
+    func testDeleteUsesCapturedIdentityAndDefaultEnterCancels() async throws {
+        let document = fixture(count: 2)
+        let model = try await makeModel(document)
+        try select(document.bookmarks[0].id, in: model)
+        model.requestDeleteSelection()
+        XCTAssertFalse(model.isTextInputActive)
+        model.selectItem(at: 1)
+        XCTAssertEqual(model.items[model.selectedIndex].id, document.bookmarks[0].id)
+        model.submitInput()
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(try saved(model), document)
+        model.requestDeleteSelection()
+        XCTAssertTrue(model.handleKey(try key(16, "y"), isTextEditing: false))
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model).bookmarks.map(\.id), [document.bookmarks[1].id])
+    }
+
+    func testNonemptyFolderCannotBeDeletedAndEmptyFolderCan() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let bookmark = Bookmark(title: "子项", url: "https://example.com", groupId: group.id)
+        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [bookmark]))
+        model.requestDeleteSelection()
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.logs.last?.level, .error)
+        try await model.store.apply { try $0.deleteBookmark(id: bookmark.id) }
+        try await settle { !model.busy }
+        model.requestDeleteSelection()
+        XCTAssertEqual(model.prompt?.command, "delete")
+        _ = model.handleKey(try key(16, "y"), isTextEditing: false)
+        try await settle { !model.busy }
+        XCTAssertTrue(try saved(model).groups.isEmpty)
+    }
+
+    func testSearchClickHandsKeyboardToResultWithoutClearingQuery() async throws {
+        let document = fixture(count: 3)
+        let model = try await makeModel(document)
+        model.startSearch()
+        model.updateInput("example.com")
+        XCTAssertEqual(model.items.count, 3)
+        model.selectItem(at: 1)
+        XCTAssertNil(model.inputKind)
+        XCTAssertEqual(model.query, "example.com")
+        _ = model.handleKey(try key(14, "e"), isTextEditing: false)
+        XCTAssertEqual(model.prompt?.command, "edit")
+        XCTAssertEqual(model.inputText, document.bookmarks[1].title)
+        model.updateInput("未提交")
+        model.selectItem(at: 0)
+        XCTAssertEqual(model.inputText, "未提交")
+        XCTAssertEqual(model.selectedIndex, 1)
+    }
+
+    func testSearchIncludesGroupLabelsAndNoFakeAddResult() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let bookmark = Bookmark(title: "查找我", url: "https://needle.example", groupId: group.id)
+        let root = Bookmark(title: "根目录结果", url: "https://www.needle.example/root", order: 1)
+        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [bookmark, root]))
+        model.runCommand("find needle")
+        XCTAssertEqual(model.items.count, 2)
+        XCTAssertEqual(model.items.first { $0.id == bookmark.id }?.groupName, group.name)
+        XCTAssertEqual(model.items.first { $0.id == bookmark.id }?.groupID, group.id)
+        XCTAssertEqual(model.items.first { $0.id == root.id }?.groupName, "根目录")
+        XCTAssertEqual(model.items.first { $0.id == root.id }?.detail, "needle.example")
+        XCTAssertFalse(model.items.contains { $0.kind == .add })
+        model.updateInput("完全不存在")
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertEqual(model.selectedIndex, 0)
+        XCTAssertEqual(model.scrollIndex, 0)
+    }
+
+    func testNormalTextDeletionNavigationAndCommandEditingAreNotConsumed() async throws {
+        let model = try await makeModel()
+        model.addBookmark()
+        for code: UInt16 in [0, 51, 117, 123, 124, 115, 119] {
+            XCTAssertFalse(model.handleKey(try key(code, "a"), isTextEditing: true))
+        }
+        for text in ["a", "c", "v", "x", "z"] {
+            XCTAssertFalse(model.handleKey(try key(0, text, modifiers: .command), isTextEditing: true))
+        }
+        model.escape()
+        model.startCommand()
+        XCTAssertFalse(model.handleKey(try key(51, "\u{7f}"), isTextEditing: true))
+        model.escape()
+        for text in ["0", "1", "2", "9"] {
+            XCTAssertFalse(model.handleKey(try key(18, text), isTextEditing: false))
+        }
+    }
+
+    func testMarkedTextRouterPreservesAllIMEKeysAndPromptDraft() async throws {
+        let model = try await makeModel()
+        model.addBookmark()
+        model.updateInput("拼音前的草稿")
         let editor = NSTextView(frame: .zero)
         editor.setMarkedText("拼", selectedRange: NSRange(location: 1, length: 0),
                              replacementRange: NSRange(location: NSNotFound, length: 0))
-        XCTAssertTrue(editor.hasMarkedText())
-        model.showEditor = true
-        XCTAssertFalse(LauncherKeyRouter.handle(try key(53), model: model, firstResponder: editor))
-        XCTAssertTrue(model.showEditor)
-        model.showEditor = false
-        for code: UInt16 in [36, 76, 123, 124, 125, 126] {
-            model.folderID = nil; model.selection = nil
+        for code: UInt16 in [53, 36, 76, 48, 51, 123, 124, 125, 126] {
             XCTAssertFalse(LauncherKeyRouter.handle(try key(code), model: model, firstResponder: editor))
-            XCTAssertNil(model.folderID)
-            XCTAssertNil(model.selection)
         }
         XCTAssertTrue(editor.hasMarkedText())
+        XCTAssertEqual(model.inputText, "拼音前的草稿")
+        XCTAssertEqual(model.prompt?.command, "add")
         editor.unmarkText()
-        model.showEditor = true
         XCTAssertTrue(LauncherKeyRouter.handle(try key(53), model: model, firstResponder: editor))
-        XCTAssertFalse(model.showEditor)
-        model.folderID = nil; model.selection = nil
-        XCTAssertTrue(LauncherKeyRouter.handle(try key(36), model: model, firstResponder: editor))
-        XCTAssertEqual(model.folderID, group.id)
+        XCTAssertNil(model.prompt)
     }
 
-    func testKeyboardPageChangeInvalidatesMergeBeforeDrop() async throws {
-        let document = fixture(count: 40)
+    func testHidePreservesInputAndRevisionWithoutDiscardingPrompt() async throws {
+        let model = try await makeModel()
+        model.visible = true
+        model.presented = true
+        model.addBookmark()
+        model.updateInput("尚未保存.example")
+        let revision = model.inputRevision
+        model.didHide()
+        XCTAssertFalse(model.visible)
+        XCTAssertFalse(model.presented)
+        XCTAssertEqual(model.prompt?.command, "add")
+        XCTAssertEqual(model.inputText, "尚未保存.example")
+        XCTAssertEqual(model.inputRevision, revision)
+    }
+
+    func testOrganizingOnlyReordersBookmarksOnePlaceWithoutMovingFixedEntries() async throws {
+        let group = BookmarkGroup(name: "固定文件夹", order: 50)
+        var document = fixture(count: 3)
+        document.groups = [group]
         let model = try await makeModel(document)
-        let target = document.bookmarks[1]
-        let point = CGPoint(x: 260, y: 130)
-        model.frames["root::\(target.id)"] = CGRect(x: 200, y: 100, width: 120, height: 150)
-        model.drag(.bookmark(document.bookmarks[0]), point: point)
-        try await settle { model.mergeTarget == target.id }
-        XCTAssertTrue(LauncherKeyRouter.handle(try key(121), model: model, firstResponder: nil))
-        XCTAssertEqual(model.rootPage, 1)
-        XCTAssertNil(model.mergeTarget)
-        // 保留上一页 frame，模拟 SwiftUI 还未提交新一页布局的 mouseUp。
-        model.finishDrag(point: point)
-        try await settle { model.store.document != document }
-        XCTAssertTrue(model.store.document.groups.isEmpty)
-        XCTAssertEqual(model.store.document.rootItems.last?.id, document.bookmarks[0].id)
+        try select(document.bookmarks[0].id, in: model)
+        _ = model.handleKey(try key(31, "o"), isTextEditing: false)
+        _ = model.handleKey(try key(125, modifiers: .shift), isTextEditing: false)
+        try await settle { !model.busy }
+        XCTAssertEqual(model.items.first?.id, group.id)
+        XCTAssertFalse(model.items.contains { $0.kind == .add })
+        XCTAssertEqual(try saved(model).bookmarks(in: nil).map(\.id), [document.bookmarks[1].id, document.bookmarks[0].id, document.bookmarks[2].id])
+        XCTAssertEqual(model.items[model.selectedIndex].id, document.bookmarks[0].id)
+        try select(group.id, in: model)
+        let before = try saved(model)
+        _ = model.handleKey(try key(125, modifiers: .shift), isTextEditing: false)
+        XCTAssertEqual(try saved(model), before)
+        model.startSearch()
+        model.updateInput("example")
+        _ = model.handleKey(try key(125, modifiers: .shift), isTextEditing: true)
+        XCTAssertEqual(try saved(model), before)
     }
 
-    func testDropOutsideDwelledIconDoesNotMerge() async throws {
+    func testDropIntoFolderReturnRootAndMergePersistRealMembership() async throws {
+        var document = fixture(count: 2)
+        let group = BookmarkGroup(name: "目的地", order: 20)
+        document.groups = [group]
+        let model = try await makeModel(document)
+        _ = model.handleKey(try key(31, "o"), isTextEditing: false)
+        let source = document.bookmarks[0].id
+        let target = document.bookmarks[1].id
+        model.dropBookmark(sourceID: source, targetID: group.id, before: false, merge: false)
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model).bookmarks.first { $0.id == source }?.groupId, group.id)
+        model.dropBookmark(sourceID: source, targetID: nil, before: false, merge: false)
+        try await settle { !model.busy }
+        XCTAssertNil(try saved(model).bookmarks.first { $0.id == source }?.groupId)
+        model.dropBookmark(sourceID: source, targetID: target, before: false, merge: true)
+        try await settle { !model.busy }
+        let result = try saved(model)
+        XCTAssertEqual(result.groups.count, 2)
+        XCTAssertNotNil(result.bookmarks[0].groupId)
+        XCTAssertEqual(result.bookmarks[0].groupId, result.bookmarks[1].groupId)
+        XCTAssertEqual(result.groups.first { $0.id == group.id }?.name, "目的地")
+    }
+
+    func testScrollingAndExternalShrinkClampSelectionWithoutReplacingDraft() async throws {
+        let model = try await makeModel(fixture(count: 70))
+        _ = model.handleKey(try key(5, "G", modifiers: .shift), isTextEditing: false)
+        XCTAssertEqual(model.selectedIndex, 69)
+        XCTAssertEqual(model.scrollIndex, 51)
+        model.scroll(rows: -10)
+        XCTAssertGreaterThanOrEqual(model.selectedIndex, model.scrollIndex)
+        XCTAssertLessThan(model.selectedIndex, model.scrollIndex + model.visibleRowCount)
+        model.addBookmark()
+        model.updateInput("unsaved.example")
+        let revision = model.inputRevision
+        let replacement = fixture(count: 1)
+        try replacement.encoded().write(to: model.store.directory.appendingPathComponent("bookmarks.json"), options: .atomic)
+        await model.store.reloadIfChanged()
+        try await settle { model.items.count == 1 }
+        XCTAssertEqual(model.scrollIndex, 0)
+        XCTAssertLessThan(model.selectedIndex, model.items.count)
+        XCTAssertEqual(model.inputText, "unsaved.example")
+        XCTAssertEqual(model.inputRevision, revision)
+    }
+
+    func testBackupUsesRealPathWithSpacesAndRejectsCurrentFile() async throws {
         let document = fixture(count: 2)
         let model = try await makeModel(document)
-        let target = document.bookmarks[1]
-        model.frames["root::\(target.id)"] = CGRect(x: 200, y: 100, width: 120, height: 150)
-        model.drag(.bookmark(document.bookmarks[0]), point: CGPoint(x: 260, y: 130))
-        try await settle { model.mergeTarget == target.id }
-        model.finishDrag(point: CGPoint(x: 900, y: 500))
-        try await settle { model.store.document != document }
-        XCTAssertTrue(model.store.document.groups.isEmpty)
-        XCTAssertEqual(model.store.document.rootItems.last?.id, document.bookmarks[0].id)
+        let backup = model.store.directory.appendingPathComponent("备份 with spaces.json")
+        model.runCommand("backup \(backup.path)")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.job?.status, .success)
+        XCTAssertEqual(try BookmarkDocument.decode(Data(contentsOf: backup)), document)
+        XCTAssertEqual(try saved(model), document)
+        model.runCommand("backup \(model.store.directory.appendingPathComponent("bookmarks.json").path)")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.job?.status, .failure)
+        XCTAssertEqual(model.prompt?.command, "backup")
+        XCTAssertNotNil(model.prompt?.error)
+        XCTAssertEqual(try saved(model), document)
     }
 
-    func testSearchFromOpenFolderAddsAtRootAndKeepsExistingDraft() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let model = try await makeModel(BookmarkDocument(groups: [group]))
-        model.openFolder(group)
-        model.query = "全局搜索"; model.queryChanged()
-        model.addBookmark()
-        XCTAssertEqual(model.draft.location, "__root__")
-        model.draft = BookmarkDraft(url: "example.com", title: "未提交", location: group.id)
-        model.showEditor = false
-        model.addBookmark()
-        XCTAssertEqual(model.draft.title, "未提交")
-        XCTAssertEqual(model.draft.location, group.id)
+    func testRestorePromptWarnsBeforeEnterAndExplicitCommandReplacesWithoutMerging() async throws {
+        let model = try await makeModel(fixture(count: 2))
+        let replacement = fixture(count: 4)
+        let backup = model.store.directory.appendingPathComponent("restore source.json")
+        try replacement.encoded().write(to: backup)
+        model.runCommand("restore")
+        model.updateInput(backup.path)
+        XCTAssertEqual(model.prompt?.field, "file")
+        XCTAssertTrue(model.isTextInputActive)
+        XCTAssertTrue(model.prompt?.hint.contains("替换全部书签与文件夹") == true)
+        XCTAssertEqual(model.document.bookmarks.count, 2)
+        model.escape()
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.document.bookmarks.count, 2)
+        model.runCommand("restore \(backup.path)")
+        model.runCommand("restore \(backup.path)")
+        XCTAssertTrue(model.busy)
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model), replacement)
+        XCTAssertEqual(model.job?.status, .success)
+        XCTAssertNil(model.prompt)
     }
 
-    func testEscapeClosesOverlayBeforeInlineRenameAndPreservesText() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let model = try await makeModel(BookmarkDocument(groups: [group]))
-        model.rename(group); model.renameText = "尚未保存的名称"
-        let initialFocus = try XCTUnwrap(model.renameFocusToken)
-        model.addBookmark()
-        XCTAssertNil(model.renameFocusToken)
-        XCTAssertNotNil(model.editorFocusToken)
-        model.escape()
-        XCTAssertFalse(model.showEditor)
-        XCTAssertNil(model.editorFocusToken)
-        XCTAssertNotEqual(try XCTUnwrap(model.renameFocusToken), initialFocus)
-        XCTAssertEqual(model.renamingID, group.id)
-        XCTAssertEqual(model.renameText, "尚未保存的名称")
-        model.showSettings = true
-        XCTAssertNil(model.renameFocusToken)
-        model.escape()
-        XCTAssertFalse(model.showSettings)
-        XCTAssertNotNil(model.renameFocusToken)
-        XCTAssertEqual(model.renamingID, group.id)
-        XCTAssertEqual(model.renameText, "尚未保存的名称")
-        model.escape()
-        XCTAssertNil(model.renamingID)
-        XCTAssertNil(model.renameFocusToken)
-        XCTAssertEqual(model.folderID, group.id)
-    }
-
-    func testEscapeAndFocusFollowStandaloneRenameDeleteEditorSettingsOrder() async throws {
-        let group = BookmarkGroup(name: "工作")
-        let bookmark = Bookmark(title: "书签", url: "https://example.com")
-        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [bookmark]))
-        model.renamingID = group.id; model.renameText = "保留名称"
-        model.deleteTarget = .bookmark(bookmark); model.showEditor = true; model.showSettings = true
-        XCTAssertNotNil(model.renameFocusToken)
-        XCTAssertNil(model.editorFocusToken)
-        model.escape()
-        XCTAssertNil(model.renamingID)
-        XCTAssertNotNil(model.deleteTarget)
-        XCTAssertTrue(model.showEditor); XCTAssertTrue(model.showSettings)
-        XCTAssertNil(model.editorFocusToken)
-        model.escape()
-        XCTAssertNil(model.deleteTarget)
-        XCTAssertNotNil(model.editorFocusToken)
-        model.escape()
-        XCTAssertFalse(model.showEditor); XCTAssertTrue(model.showSettings)
-        XCTAssertNil(model.editorFocusToken)
-        model.escape()
-        XCTAssertFalse(model.showSettings)
-        XCTAssertEqual(model.renameText, "保留名称")
-    }
-
-    func testDropWithoutCompletedDwellDoesNotCreateFolder() async throws {
+    func testCorruptRestoreRetainsSavedDataAndEditableSourceDraft() async throws {
         let document = fixture(count: 2)
         let model = try await makeModel(document)
-        let point = CGPoint(x: 260, y: 130)
-        model.frames["root::\(document.bookmarks[1].id)"] = CGRect(x: 200, y: 100, width: 120, height: 150)
-        model.drag(.bookmark(document.bookmarks[0]), point: point)
-        XCTAssertNil(model.mergeTarget)
-        model.finishDrag(point: point)
-        XCTAssertNil(model.dragItem)
-        XCTAssertEqual(model.store.document, document)
+        let backup = model.store.directory.appendingPathComponent("corrupt.json")
+        try Data("{}".utf8).write(to: backup)
+        model.runCommand("restore \(backup.path)")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.job?.status, .failure)
+        XCTAssertEqual(model.prompt?.field, "file")
+        XCTAssertEqual(model.inputText, backup.path)
+        XCTAssertNotNil(model.prompt?.error)
+        XCTAssertEqual(try saved(model), document)
     }
 
-    func testEdgePageChangeStillAllowsCrossPageDrop() async throws {
-        let document = fixture(count: 40)
+    func testDirectorySwitchSeedsEmptyDirectoryAndReadsExistingFileWithoutChangingOldFile() async throws {
+        let document = fixture(count: 2)
         let model = try await makeModel(document)
-        model.drag(.bookmark(document.bookmarks[0]), point: CGPoint(x: model.metrics.size.width - 10, y: 500))
-        try await settle { model.rootPage == 1 }
-        XCTAssertNotNil(model.dragItem)
-        model.finishDrag(point: CGPoint(x: 900, y: 500))
-        try await settle { model.store.document != document }
-        XCTAssertTrue(model.store.document.groups.isEmpty)
-        XCTAssertEqual(model.store.document.rootItems.last?.id, document.bookmarks[0].id)
+        let original = model.store.directory
+        let target = try directory().appendingPathComponent("space directory")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        model.runCommand("cd \(target.path)")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.store.directory, target.standardizedFileURL.resolvingSymlinksInPath())
+        XCTAssertEqual(try saved(model), document)
+        XCTAssertEqual(try BookmarkDocument.decode(Data(contentsOf: original.appendingPathComponent("bookmarks.json"))), document)
+        let existing = try directory()
+        let replacement = fixture(count: 1)
+        try replacement.encoded().write(to: existing.appendingPathComponent("bookmarks.json"))
+        model.runCommand("set data \(existing.path)")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.document, replacement)
+        XCTAssertTrue(model.settingsRows.contains { $0.key == "file" && $0.value == model.store.directory.appendingPathComponent("bookmarks.json").path })
+    }
+
+    func testMissingDirectoryFailurePreservesDirectoryDataAndDraft() async throws {
+        let document = fixture(count: 2)
+        let model = try await makeModel(document)
+        let original = model.store.directory
+        let missing = original.appendingPathComponent("does not exist")
+        model.runCommand("cd \(missing.path)")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.store.directory, original)
+        XCTAssertEqual(try saved(model), document)
+        XCTAssertEqual(model.job?.status, .failure)
+        XCTAssertEqual(model.inputText, missing.path)
+        XCTAssertNotNil(model.prompt?.error)
+    }
+
+    func testPathCompletionListsOnlyRealDirectoriesAndJSONFilesAndClickDoesNotSubmit() async throws {
+        let model = try await makeModel()
+        let base = model.store.directory
+        let folder = base.appendingPathComponent("真实目录")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let json = base.appendingPathComponent("实际备份.json")
+        try BookmarkDocument().encoded().write(to: json)
+        try Data("ignore".utf8).write(to: base.appendingPathComponent("not-json.txt"))
+        model.runCommand("restore")
+        model.updateInput(base.path + "/")
+        let expectedJSON = json.resolvingSymlinksInPath()
+        let expectedFolder = folder.resolvingSymlinksInPath()
+        try await settle {
+            model.prompt?.choices.contains { URL(fileURLWithPath: $0.id).resolvingSymlinksInPath() == expectedJSON } == true
+        }
+        let choices = try XCTUnwrap(model.prompt?.choices)
+        XCTAssertTrue(choices.contains { URL(fileURLWithPath: $0.id).resolvingSymlinksInPath() == expectedFolder })
+        XCTAssertFalse(choices.contains { $0.label.hasSuffix(".txt") })
+        let jsonChoice = try XCTUnwrap(choices.first { URL(fileURLWithPath: $0.id).resolvingSymlinksInPath() == expectedJSON })
+        try choose(jsonChoice.id, in: model)
+        XCTAssertEqual(URL(fileURLWithPath: model.inputText).resolvingSymlinksInPath(), expectedJSON)
+        XCTAssertEqual(model.prompt?.field, "file")
+        XCTAssertFalse(model.busy)
+        model.escape()
+        model.runCommand("cd")
+        model.updateInput(base.path + "/")
+        try await settle {
+            model.prompt?.choices.contains { URL(fileURLWithPath: $0.id).resolvingSymlinksInPath() == expectedFolder } == true
+        }
+        for choice in try XCTUnwrap(model.prompt?.choices) {
+            XCTAssertTrue(try URL(fileURLWithPath: choice.id).resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true)
+        }
+    }
+
+    func testExternalConflictRetainsLatestDiskAndEditDraftForExplicitRetry() async throws {
+        let original = fixture(count: 1)
+        let model = try await makeModel(original)
+        try select(original.bookmarks[0].id, in: model)
+        model.runCommand("edit")
+        model.updateInput("本地未提交标题")
+        var external = original
+        external.bookmarks.append(Bookmark(title: "外部新增", url: "https://external.example", order: 1))
+        try external.encoded().write(to: model.store.directory.appendingPathComponent("bookmarks.json"), options: .atomic)
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model), external)
+        XCTAssertEqual(model.document, external)
+        XCTAssertEqual(model.inputText, "本地未提交标题")
+        XCTAssertEqual(model.prompt?.command, "edit")
+        XCTAssertNotNil(model.prompt?.error)
+        model.submitInput()
+        try await settle { !model.busy }
+        XCTAssertEqual(try saved(model).bookmarks.count, 2)
+        XCTAssertEqual(model.document.bookmarks.first { $0.id == original.bookmarks[0].id }?.title, "本地未提交标题")
+        XCTAssertTrue(model.document.bookmarks.contains { $0.title == "外部新增" })
+    }
+
+    func testCommandCompletionCyclesAndTypedInputStartsFreshCandidates() async throws {
+        let model = try await makeModel()
+        model.startCommand()
+        model.updateInput("r")
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "rename")
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "restore")
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "rename")
+        model.updateInput("set finder a")
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "set finder authorize")
+    }
+
+    func testSearchFromFolderAddsToRootAndEscapeUnwindsOneStateAtATime() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let model = try await makeModel(BookmarkDocument(groups: [group]))
+        model.activateSelection()
+        model.startSearch()
+        model.updateInput("全局搜索")
+        addThroughTitle(model)
+        XCTAssertEqual(model.prompt?.choices[model.prompt?.selectedChoice ?? 0].id, "__root__")
+        model.escape()
+        XCTAssertEqual(model.query, "全局搜索")
+        XCTAssertEqual(model.folderID, group.id)
+        model.escape()
+        XCTAssertEqual(model.query, "")
+        XCTAssertEqual(model.folderID, group.id)
+        model.escape()
+        XCTAssertNil(model.folderID)
+        var hidden = false
+        model.dismissWindow = { hidden = true }
+        model.escape()
+        XCTAssertTrue(hidden)
+    }
+
+    func testIsolatedLoginCommandsReportControllerErrorsWithoutClaimingSystemActions() async throws {
+        let model = try await makeModel()
+        let enabled = model.login.enabled
+        for value in ["on", "off", "approve"] {
+            let start = model.logs.count
+            model.runCommand("set login \(value)")
+            let error = try XCTUnwrap(model.login.error)
+            XCTAssertEqual(model.logs.last?.level, .error)
+            XCTAssertEqual(model.logs.last?.text, error)
+            XCTAssertEqual(model.login.enabled, enabled)
+            XCTAssertFalse(model.login.changing)
+            XCTAssertFalse(model.logs.dropFirst(start).contains {
+                $0.text.hasPrefix("已打开系统") || $0.text.hasPrefix("已请求系统")
+            })
+            XCTAssertTrue(model.settingsRows.contains { $0.kind == .note && $0.value == error && $0.level == .error })
+        }
+    }
+
+    func testSettingsStatusTracksRealLogCountIncludingClear() async throws {
+        let model = try await makeModel(fixture(count: 3))
+        XCTAssertEqual(model.settingsRows.first { $0.key == "bookmarks" }?.value, "3")
+        XCTAssertEqual(model.settingsRows.first { $0.key == "groups" }?.value, "0")
+        XCTAssertEqual(model.settingsRows.first { $0.key == "schema" }?.value, "frog-bookmarks v1")
+        model.runCommand("unknown-command")
+        XCTAssertEqual(model.settingsRows.first { $0.key == "log" }?.value, "\(model.logs.count) lines")
+        model.runCommand("clear")
+        XCTAssertTrue(model.logs.isEmpty)
+        XCTAssertEqual(model.settingsRows.first { $0.key == "log" }?.value, "0 lines")
+    }
+
+    func testSettingsHaveNoSingleLetterActionsAndSeparateDataFromOperations() async throws {
+        let model = try await makeModel(fixture(count: 3))
+        model.selectItem(at: 1)
+        model.openSettings()
+        XCTAssertEqual(model.modeLabel, "BUFFER:SETTINGS")
+        let initial = model.settingsRows
+        for character in ["l", "h", "r", "c", "a", "n", "e", "m", "D", "C", "o", "1", "j", "k", "g", "G", "/", "?", ","] {
+            XCTAssertTrue(model.handleKey(try key(0, character), isTextEditing: false))
+        }
+        for modifiers: NSEvent.ModifierFlags in [.command, .control, .option] {
+            XCTAssertFalse(model.handleKey(try key(0, "a", modifiers: modifiers), isTextEditing: false))
+        }
+        XCTAssertEqual(model.selectedIndex, 1)
+        XCTAssertNil(model.inputKind)
+        XCTAssertFalse(model.isOrganizing)
+        XCTAssertEqual(model.buffer, .settings)
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.settingsRows, initial)
+        XCTAssertEqual(initial.filter { $0.kind == .section }.map(\.key),
+                       ["[general] · 通用", "[data] · 书签数据", "[operations] · 数据操作", "[status] · 运行状态"])
+        XCTAssertEqual(initial.first?.kind, .note)
+        XCTAssertTrue(initial.first?.value.contains("本机偏好") == true)
+        XCTAssertEqual(initial[1].kind, .blank)
+        XCTAssertFalse(initial.contains { $0.key == "directory" })
+        let fileIndex = try XCTUnwrap(initial.firstIndex { $0.key == "file" })
+        XCTAssertEqual(initial[fileIndex].value, model.store.directory.appendingPathComponent("bookmarks.json").path)
+        XCTAssertEqual(initial[fileIndex].command, ":cd <目录>")
+        XCTAssertEqual(initial[fileIndex + 1].kind, .note)
+        XCTAssertTrue(initial[fileIndex + 1].value.contains("文件名固定为 bookmarks.json"))
+        XCTAssertEqual(initial.filter { $0.kind == .action }.map(\.command), [":backup [文件路径]", ":restore <备份文件>"])
+        XCTAssertTrue(model.handleKey(try key(41, ":", modifiers: .shift), isTextEditing: false))
+        XCTAssertEqual(model.inputKind, .command)
+        XCTAssertEqual(model.modeLabel, "COMMAND")
+        model.escape()
+        XCTAssertEqual(model.buffer, .settings)
+        XCTAssertEqual(model.modeLabel, "BUFFER:SETTINGS")
+        model.escape()
+        XCTAssertNil(model.buffer)
+        model.openBuffer(.help)
+        XCTAssertEqual(model.modeLabel, "BUFFER:HELP")
+        model.runCommand("mkdir")
+        XCTAssertEqual(model.buffer, .help)
+        XCTAssertEqual(model.modeLabel, "PROMPT")
+        model.escape()
+        XCTAssertEqual(model.modeLabel, "BUFFER:HELP")
+        model.startSearch()
+        XCTAssertEqual(model.modeLabel, "SEARCH")
+    }
+
+    func testBareCommaOpensSettingsAndF1TogglesAtlasBackToList() async throws {
+        let model = try await makeModel(fixture(count: 3))
+        model.selectItem(at: 1)
+        XCTAssertTrue(model.handleKey(try key(43, ","), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .settings)
+        model.escape()
+        XCTAssertTrue(model.handleKey(try key(122), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .atlas)
+        model.selectItem(at: 5)
+        XCTAssertEqual(model.atlasIndex, 5)
+        XCTAssertTrue(model.handleKey(try key(122), isTextEditing: false))
+        XCTAssertNil(model.buffer)
+        XCTAssertEqual(model.atlasIndex, 5)
+        XCTAssertEqual(model.selectedIndex, 1)
+        XCTAssertTrue(model.handleKey(try key(43, ",", modifiers: .command), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .settings)
+    }
+
+    func testOpenRejectsIntegerOverflowAndBuffersKeepSearchAndHelpShortcuts() async throws {
+        let model = try await makeModel(fixture(count: 3))
+        model.runCommand("open -9223372036854775808")
+        XCTAssertEqual(model.logs.last?.level, .error)
+        XCTAssertEqual(model.selectedIndex, 0)
+        model.openBuffer(.log)
+        XCTAssertTrue(model.handleKey(try key(44, "/"), isTextEditing: false))
+        XCTAssertNil(model.buffer)
+        XCTAssertEqual(model.inputKind, .search)
+        model.openBuffer(.log)
+        XCTAssertTrue(model.handleKey(try key(44, "?", modifiers: .shift), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .help)
+    }
+
+    func testCommandHistoryCompletionAndAtlasUseActualCommandCatalog() async throws {
+        let model = try await makeModel()
+        model.startCommand()
+        model.updateInput("hel")
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "help")
+        model.submitInput()
+        XCTAssertEqual(model.buffer, .help)
+        model.startCommand()
+        model.updateInput("未提交命令")
+        _ = model.handleKey(try key(126), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "help")
+        _ = model.handleKey(try key(125), isTextEditing: true)
+        XCTAssertEqual(model.inputText, "未提交命令")
+        model.escape()
+        model.openBuffer(.atlas)
+        let add = try XCTUnwrap(model.commands.firstIndex { $0.name == "add" })
+        model.selectItem(at: add)
+        model.activateSelection()
+        XCTAssertEqual(model.prompt?.command, "add")
+        XCTAssertFalse(model.commands.contains { ["refresh", "favicons"].contains($0.name) })
+        model.escape()
+        model.openBuffer(.atlas)
+        model.selectItem(at: try XCTUnwrap(model.commands.firstIndex { $0.name == "set" }))
+        model.activateSelection()
+        XCTAssertEqual(model.buffer, .settings)
+        XCTAssertNil(model.inputKind)
+        model.escape()
+        model.openBuffer(.atlas)
+        model.selectItem(at: try XCTUnwrap(model.commands.firstIndex { $0.name == "group" }))
+        model.activateSelection()
+        XCTAssertNil(model.buffer)
+        XCTAssertEqual(model.inputKind, .command)
+        XCTAssertEqual(model.inputText, "group ")
+    }
+
+    func testClearOnlyRemovesLogsAndQuitInvokesApplicationCallback() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
+        model.runCommand("does-not-exist")
+        XCTAssertEqual(model.logs.last?.level, .error)
+        model.runCommand("clear")
+        XCTAssertTrue(model.logs.isEmpty)
+        XCTAssertEqual(try saved(model), document)
+        var didQuit = false
+        model.terminateApplication = { didQuit = true }
+        model.runCommand("q")
+        XCTAssertTrue(didQuit)
     }
 }

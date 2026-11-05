@@ -1,0 +1,13 @@
+{
+  "name": "frog-echo-tui-prototype",
+  "private": true,
+  "scripts": {
+    "test": "playwright test interaction.spec.mjs --workers=1 --reporter=list"
+  },
+  "devDependencies": {
+    "@babel/standalone": "7.29.0",
+    "@playwright/test": "1.64.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>青蛙导航 · 涟漪 — 键盘优先命令面板原型</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+/* ===== 设计令牌 ===== */
+:root{
+  --frog:#A8D08A;
+  --frog-deep:#7FB35A;
+  --olive:#3E4634;
+  --cream:#FAF5E4;
+  --pink:#F2A68C;
+  --bg0:#0D100B;
+  --bg1:#16211A;
+  --ink:#EDEFE6;
+  --ink-dim:rgba(237,239,230,0.52);
+  --ink-faint:rgba(237,239,230,0.34);
+  --glass:rgba(250,245,228,0.055);
+  --line:rgba(168,208,138,0.16);
+  --spring:cubic-bezier(0.32,0.72,0.35,1);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;
+  color:var(--ink);
+  background:
+    radial-gradient(1150px 760px at 50% 14%, var(--bg1) 0%, var(--bg0) 72%) fixed,
+    var(--bg0);
+  min-height:100vh;
+  overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+.stage{
+  min-height:100vh;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  padding:54px 24px 104px;
+}
+
+/* ===== 品牌区 ===== */
+.hero{display:flex;flex-direction:column;align-items:center;margin-bottom:34px}
+.frog{
+  width:96px;height:96px;margin-bottom:26px;
+  filter:drop-shadow(0 12px 26px rgba(0,0,0,0.5));
+  animation:frogFloat 3s ease-in-out infinite alternate;
+}
+@keyframes frogFloat{
+  from{transform:translateY(-4px)}
+  to{transform:translateY(4px)}
+}
+
+/* ===== 搜索框 ===== */
+.search{
+  width:640px;max-width:92vw;height:64px;
+  border-radius:20px;
+  display:flex;align-items:center;gap:14px;
+  padding:0 22px;
+  background:var(--glass);
+  border:1px solid var(--line);
+  backdrop-filter:blur(18px) saturate(1.3);
+  -webkit-backdrop-filter:blur(18px) saturate(1.3);
+  box-shadow:0 18px 48px rgba(0,0,0,0.35);
+  transition:border-color 0.25s var(--spring), box-shadow 0.25s var(--spring);
+}
+.search>svg{color:var(--ink-dim);flex:none}
+.search.is-focus{
+  border-color:rgba(168,208,138,0.55);
+  box-shadow:0 0 0 3px rgba(168,208,138,0.14), 0 18px 48px rgba(0,0,0,0.4);
+}
+.search.is-idle{animation:idlePulse 2.6s ease-in-out infinite}
+@keyframes idlePulse{
+  0%,100%{border-color:rgba(168,208,138,0.2);box-shadow:0 0 0 1px rgba(168,208,138,0.06),0 18px 48px rgba(0,0,0,0.35)}
+  50%{border-color:rgba(168,208,138,0.42);box-shadow:0 0 0 1px rgba(168,208,138,0.16),0 0 30px rgba(168,208,138,0.1),0 18px 48px rgba(0,0,0,0.35)}
+}
+.search input{
+  flex:1;min-width:0;
+  background:none;border:none;outline:none;
+  color:var(--ink);
+  font-size:19px;letter-spacing:0.2px;
+  font-family:inherit;
+}
+.search input::placeholder{color:var(--ink-faint)}
+.type-hint{
+  flex:none;font-size:12px;letter-spacing:0.5px;
+  color:var(--frog);opacity:0.75;
+}
+.esc-hint{
+  flex:none;display:flex;align-items:center;gap:6px;
+  font-size:12px;color:var(--ink-dim);
+}
+
+/* ===== 键帽 ===== */
+kbd{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:20px;height:20px;padding:0 6px;
+  border-radius:6px;
+  border:1px solid rgba(250,245,228,0.18);
+  border-bottom-width:2px;
+  background:rgba(250,245,228,0.06);
+  color:var(--cream);
+  font:600 11px/1 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  letter-spacing:0.3px;
+}
+
+/* ===== 结果区 ===== */
+.results{
+  position:relative;
+  width:100%;max-width:1240px;
+  display:flex;gap:16px;align-items:flex-start;
+}
+.col{flex:1 1 0;min-width:0}
+.col-head{
+  display:flex;align-items:center;gap:8px;
+  padding:0 12px 10px;
+}
+.col-name{font-size:12px;font-weight:700;letter-spacing:2.5px;color:var(--ink-dim)}
+.col-count{
+  font-size:10.5px;font-weight:700;
+  color:var(--frog);
+  background:rgba(168,208,138,0.12);
+  border:1px solid rgba(168,208,138,0.22);
+  border-radius:999px;padding:2px 7px;
+}
+.row{
+  position:relative;
+  display:flex;align-items:center;gap:12px;
+  height:52px;padding:0 10px 0 12px;
+  border-radius:12px;
+  cursor:pointer;
+  transition:background 0.18s var(--spring);
+}
+.row::before{
+  content:"";
+  position:absolute;left:0;top:11px;bottom:11px;width:3px;
+  border-radius:3px;background:var(--frog);
+  opacity:0;transform:scaleY(0.4);
+  transition:opacity 0.18s var(--spring), transform 0.18s var(--spring);
+}
+.row.active{background:rgba(168,208,138,0.12)}
+.row.active::before{opacity:1;transform:scaleY(1)}
+.row-icon{
+  flex:none;width:40px;height:40px;border-radius:12px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:16px;font-weight:700;
+  color:rgba(250,245,228,0.95);
+  text-shadow:0 1px 2px rgba(0,0,0,0.3);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.14), 0 4px 10px rgba(0,0,0,0.25);
+}
+.row-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.row-title{
+  font-size:15px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:color 0.18s var(--spring);
+}
+.row.active .row-title{color:var(--frog)}
+.row-host{
+  font-size:13px;color:var(--ink-faint);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.row-key{flex:none;opacity:0.55}
+.row.active .row-key{opacity:0.9;border-color:rgba(168,208,138,0.4);color:var(--frog)}
+.more{padding:7px 12px;font-size:12px;color:var(--ink-faint)}
+
+/* 空结果 */
+.empty{
+  width:100%;
+  display:flex;flex-direction:column;align-items:center;gap:14px;
+  padding:72px 0 60px;
+  color:var(--ink-faint);font-size:14px;letter-spacing:0.5px;
+}
+.empty svg{color:var(--frog);opacity:0.6}
+
+/* ===== 涟漪层 ===== */
+.ripple-layer{
+  position:absolute;inset:0;
+  width:100%;height:100%;
+  overflow:visible;
+  pointer-events:none;
+  z-index:5;
+}
+.ring{
+  fill:none;
+  stroke:var(--frog);
+  stroke-width:1.5;
+  opacity:0;
+  transform-box:fill-box;
+  transform-origin:center;
+  animation:rippleRing 0.6s var(--spring) forwards;
+}
+@keyframes rippleRing{
+  0%{transform:scale(0);opacity:0.5}
+  100%{transform:scale(1);opacity:0}
+}
+
+/* ===== Toast ===== */
+.toast{
+  position:fixed;top:28px;left:50%;
+  transform:translateX(-50%);
+  z-index:50;
+  display:flex;align-items:center;gap:9px;
+  padding:11px 20px;
+  border-radius:999px;
+  background:rgba(22,33,26,0.72);
+  border:1px solid rgba(168,208,138,0.28);
+  backdrop-filter:blur(14px) saturate(1.2);
+  -webkit-backdrop-filter:blur(14px) saturate(1.2);
+  box-shadow:0 14px 40px rgba(0,0,0,0.45);
+  color:var(--cream);
+  font-size:14px;font-weight:600;letter-spacing:0.3px;
+  animation:toastIn 0.3s var(--spring);
+}
+.toast svg{color:var(--frog);flex:none}
+@keyframes toastIn{
+  from{opacity:0;transform:translate(-50%,-12px)}
+  to{opacity:1;transform:translate(-50%,0)}
+}
+
+/* ===== 页脚键位提示条 ===== */
+.hints{
+  position:fixed;bottom:22px;left:50%;
+  transform:translateX(-50%);
+  z-index:40;
+  display:flex;align-items:center;gap:12px;
+  padding:11px 20px;
+  border-radius:14px;
+  background:rgba(13,16,11,0.55);
+  border:1px solid rgba(168,208,138,0.14);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  box-shadow:0 10px 32px rgba(0,0,0,0.4);
+  font-size:12px;color:var(--ink-dim);
+  white-space:nowrap;
+}
+.hints span{display:inline-flex;align-items:center;gap:5px}
+.hints i{color:var(--ink-faint);font-style:normal}
+</style>
+</head>
+<body data-appearance="dark">
+<div id="root"></div>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+</body>
+</html>

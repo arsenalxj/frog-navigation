@@ -851,7 +851,8 @@ final class FinderJumpTests: XCTestCase {
                                       visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 875))
         let result = try XCTUnwrap(FinderJumpOverlayLayout.frame(
             targetAXFrame: CGRect(x: 400, y: 200, width: 600, height: 400), screens: [screen], primaryScreenHeight: 900))
-        XCTAssertEqual(result, CGRect(x: 440, y: 250, width: 520, height: 44))
+        XCTAssertEqual(result.midX, 700)
+        XCTAssertEqual(result.maxY, 900 - (200 + 400) - 6)
         XCTAssertTrue(screen.visibleFrame.contains(result))
     }
 
@@ -873,7 +874,7 @@ final class FinderJumpTests: XCTestCase {
         let result = try XCTUnwrap(FinderJumpOverlayLayout.frame(
             targetAXFrame: CGRect(x: -1240, y: 260, width: 400, height: 500), screens: [main, left], primaryScreenHeight: 900))
         XCTAssertEqual(result.minX, -1272)
-        XCTAssertEqual(result.minY, 90)
+        XCTAssertEqual(result.maxY, 900 - (260 + 500) - 6)
         XCTAssertTrue(left.visibleFrame.insetBy(dx: 8, dy: 8).contains(result))
     }
 

@@ -1,12 +1,10 @@
 # 青蛙导航 原生 macOS 应用
 
-此目录提供 macOS 14 及以上的本地书签启动台，使用 SwiftUI、AppKit 与 Foundation，不依赖网页端 API。
+此目录提供 macOS 14 及以上的本地书签启动台，采用 AppKit 原生交互与绘制，静态图标使用本地 SVG 资源，不嵌入 WebView。
 
 - `Sources/FrogCore/`：模型、数据存储、同步文件监听与可测试的纯逻辑；文件名采用 Swift 类型名。
-- `Sources/FrogIcons/`：网站图标抓取、图像解码与本机缓存；不依赖书签存储。
-- `Sources/Frog/`：应用入口、窗口、界面与系统集成；按功能拆分 Swift 文件。
+- `Sources/Frog/`：应用入口、窗口、回声终端界面、命令状态与系统集成；按功能拆分 Swift 文件。`Assets/` 保存从原型导出的静态 SVG，使用 `terminal-<用途>.svg` 命名，原型图形被替换时同步替换，失去引用时删除；不保存网站图标。
 - `Tests/FrogCoreTests/`：持久化和数据行为测试；临时测试数据在测试结束时删除。
-- `Tests/FrogIconsTests/`：图标解析、请求限制与缓存测试，使用隔离临时目录。
 - `Tests/FrogTests/`：界面状态与系统集成逻辑测试；快捷键注册使用替身，本机偏好使用隔离存储，测试后清理。
 - `Resources/`：应用信息、图标和打包资源；`AppIcon.icon/` 使用共享 `../assets/frog-navigation.png` 生成满幅 PNG 图层，保留原图背景和完整构图，由系统生成圆角。`scripts/render_app_icon.swift` 只缩放原图生成 macOS 资源，`scripts/generate-icon.sh` 编译 `.icon` 与 ICNS；Windows 的 `AppIcon.ico` 由 `windows/scripts/generate-icon.ps1` 独占生成。预览只进入 `build/`。
 - `scripts/`：构建、安装和独立验收工具；Shell 文件采用短横线命名，Python/Swift 工具采用下划线命名。测量数据和临时图标集只进入忽略的 `build/`，可随时清理。
@@ -15,7 +13,7 @@
 
 检查命令：在本目录执行 `swift test`；应用交付与安装命令见本目录 `README.md`。
 
-功能依据：`../plans/PLAN_MACOSAPP.md`。根目录、文件夹和相关交互以 macOS Sequoia 15 的经典 Launchpad 为基准，保留 Dock，读取当前显示器壁纸并模糊，读取失败使用系统材质。仅添加／编辑书签和设置弹窗参考 `../designs/` 原型。
+界面与交互依据 `../designs/frog-echo-tui/SPEC.md`，按 1440×900 设计坐标等比绘制原生列表、命令行与缓冲区；静态 SVG 仅用于图形，文字与输入使用原生系统。数据与系统能力沿用现有实现，网站图标下载及缓存模块随切换移除，书签固定显示标题首字符与稳定的传统色底板。Windows 不在本轮重构范围。
 
 数据修改必须经同一个串行存储模块原子提交，持久化成功后才更新已保存界面状态；外部读取失败保留数据并暂停覆盖写入。所有说明文档使用中文。
 

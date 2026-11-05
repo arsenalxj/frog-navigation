@@ -6,16 +6,13 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "FrogCore", targets: ["FrogCore"]),
-        .library(name: "FrogIcons", targets: ["FrogIcons"]),
         .executable(name: "Frog", targets: ["Frog"])
     ],
     targets: [
         .target(name: "FrogCore"),
-        .target(name: "FrogIcons"),
-        .executableTarget(name: "Frog", dependencies: ["FrogCore", "FrogIcons"]),
+        .executableTarget(name: "Frog", dependencies: ["FrogCore"], resources: [.copy("Assets")]),
         .testTarget(name: "FrogCoreTests", dependencies: ["FrogCore"]),
-        .testTarget(name: "FrogTests", dependencies: ["Frog", "FrogCore", "FrogIcons"]),
-        .testTarget(name: "FrogIconsTests", dependencies: ["FrogIcons"])
+        .testTarget(name: "FrogTests", dependencies: ["Frog", "FrogCore"])
     ],
     swiftLanguageVersions: [.v5]
 )

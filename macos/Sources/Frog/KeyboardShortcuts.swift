@@ -86,16 +86,15 @@ struct ApplicationMenuCommand {
 }
 
 enum LauncherKeyboardCommand: Equatable {
-    case escape, settings, previousPage, nextPage, moveSelection, activate, focusSearch
+    case escape, settings, scrollUp, scrollDown, textNavigation, moveSelection, activate, focusSearch
 
     static func match(keyCode: UInt32, modifiers: UInt32, characters: String?) -> LauncherKeyboardCommand? {
         let command = modifiers & UInt32(cmdKey) != 0
         if keyCode == 53 { return .escape }
         if command, characters == "," { return .settings }
-        if command, keyCode == 123 { return .previousPage }
-        if command, keyCode == 124 { return .nextPage }
-        if keyCode == 116 { return .previousPage }
-        if keyCode == 121 { return .nextPage }
+        if command, keyCode == 123 || keyCode == 124 { return .textNavigation }
+        if keyCode == 116 { return .scrollUp }
+        if keyCode == 121 { return .scrollDown }
         if [123, 124, 125, 126].contains(keyCode), !command, modifiers & UInt32(optionKey) == 0 { return .moveSelection }
         if keyCode == 36 || keyCode == 76 { return .activate }
         if characters == "/" { return .focusSearch }

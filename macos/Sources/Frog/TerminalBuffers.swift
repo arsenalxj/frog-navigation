@@ -1,0 +1,209 @@
+import AppKit
+
+@MainActor
+extension LauncherView {
+    func drawBuffer(_ buffer: TerminalBuffer) {
+        typealias D = TerminalDrawing
+        D.text("BUFFER", 40, 36, size: 10, color: D.muted)
+        D.text("[\(buffer.rawValue)]", 102, 36, size: 13, bold: true)
+        let hint: String
+        switch buffer {
+        case .settings: hint = ""
+        case .help: hint = "Esc 返回 · : 输入命令"
+        case .log: hint = ":clear 清空 · Esc 返回"
+        case .job: hint = "Esc 返回 · :log 查看日志"
+        case .atlas: hint = "\(model.commands.count) 个命令 · j/k 移动 · Enter 打开 · F1/Esc 关闭"
+        }
+        D.text(hint, 1400, 36, size: 10.5, color: D.muted, align: .right)
+        D.rule(40, 50, 1360)
+        switch buffer {
+        case .settings: drawSettings()
+        case .help: drawHelp()
+        case .log: drawLog()
+        case .job: drawJob()
+        case .atlas: drawAtlas()
+        }
+    }
+
+    private func drawSettings() {
+        typealias D = TerminalDrawing
+        D.text("设置项", 130, 84, size: 10.5, color: D.muted)
+        D.text("当前值", 304, 84, size: 10.5, color: D.muted)
+        D.text("命令", 840, 84, size: 10.5, color: D.muted)
+        let start = min(max(0, model.bufferOffset), model.settingsRows.count)
+        let end = min(model.settingsRows.count, start + 31)
+        for index in start..<end {
+            let row = model.settingsRows[index]
+            let y = 116 + CGFloat(index - start) * 20
+            D.text(String(format: "%03d", index + 1), 96, y, size: 10, color: D.muted.withAlphaComponent(0.65))
+            switch row.kind {
+            case .blank: break
+            case .value:
+                let flashed = model.flashSetting == row.key
+                D.text(row.key, 130, y, size: 12, color: D.teal, maxWidth: 146)
+                D.text("=", 286, y, size: 12, color: D.muted)
+                D.text(row.value, 304, y, size: 12, color: flashed ? D.amber : D.level(row.level), bold: true, maxWidth: 496)
+                if flashed {
+                    let x = 312 + min(480, D.width(row.value, size: 12, bold: true))
+                    D.text("←", x, y, size: 11, color: D.amber)
+                }
+                hit(NSRect(x: 130, y: y - 10, width: 670, height: 20), "\(row.key) = \(row.value)")
+            case .section, .note, .action:
+                let text = row.key.isEmpty ? row.value : row.key
+                D.text(text, 130, y, size: 12, color: row.kind == .section ? D.green : D.level(row.level),
+                       maxWidth: row.command.isEmpty ? 1260 : 670)
+                hit(NSRect(x: 130, y: y - 10, width: row.command.isEmpty ? 1260 : 670, height: 20), text)
+            }
+            if !row.command.isEmpty {
+                D.text(row.command, 840, y, size: 10.5, color: D.muted, maxWidth: 550)
+                hit(NSRect(x: 840, y: y - 10, width: 550, height: 20), row.command)
+            }
+        }
+        bufferPosition(start: start, end: end, count: model.settingsRows.count)
+    }
+
+    private func drawHelp() {
+        typealias D = TerminalDrawing
+        D.text("NAME", 64, 84, size: 12, color: D.green, bold: true)
+        D.text("青蛙导航 — 本地书签启动台。所有操作在命令行完成。", 340, 84, size: 12)
+        D.text("SYNOPSIS", 64, 114, size: 12, color: D.green, bold: true)
+        D.text("frog [command] · j/k 选择 · : 命令 · / 搜索", 340, 114, size: 12)
+        D.text("COMMANDS", 64, 148, size: 12, color: D.green, bold: true)
+        let start = min(max(0, model.bufferOffset), model.commands.count)
+        let end = min(model.commands.count, start + 20)
+        for index in start..<end {
+            let command = model.commands[index]
+            let y = 172 + CGFloat(index - start) * 20
+            D.text(":" + command.name, 64, y, size: 12, color: D.teal, bold: true, maxWidth: 260)
+            D.text(command.summary, 340, y, size: 11.5, maxWidth: 400)
+            D.text(command.usage + (command.detail.isEmpty ? "" : " · " + command.detail), 760, y, size: 10.5, color: D.muted, maxWidth: 250)
+            hit(NSRect(x: 64, y: y - 10, width: 946, height: 20), "\(command.usage)，\(command.summary)。\(command.detail)", .draft(command.name))
+        }
+        D.rect(NSRect(x: 1030, y: 142, width: 1, height: 442), D.line)
+        D.text("KEYS · 列表模式", 1080, 148, size: 12, color: D.green, bold: true)
+        let shortcuts = [
+            ("j/k · ↑/↓", "移动"), ("g/G", "首项 / 末项"), ("PageUp/Down", "滚动"), ("Enter", "打开 / 确认"),
+            ("/", "搜索"), (":", "命令"), ("a · ⌘N", "添加书签"), ("n", "新建文件夹"), ("e", "编辑书签"),
+            ("r", "重命名文件夹"), ("m", "移动书签"), ("D", "删除确认"), ("C", "复制链接"), ("o", "整理"),
+            ("Shift+↑/↓", "书签排序"), ("Tab/⇧Tab", "候选 / 字段"), ("⌘,", "设置"), ("F1", "命令地图"), ("?", "帮助"), ("Esc", "取消 / 返回")
+        ]
+        for (index, shortcut) in shortcuts.enumerated() {
+            let y = 172 + CGFloat(index) * 20
+            D.text(shortcut.0, 1080, y, size: 11, color: D.teal, bold: true, maxWidth: 125)
+            D.text(shortcut.1, 1210, y, size: 11.5, maxWidth: 184)
+        }
+        D.rule(64, 584, 936)
+        D.text("EXAMPLES", 64, 604, size: 12, color: D.green, bold: true)
+        let examples = [
+            ("add", "逐项输入网址 / 标题 / 位置"),
+            ("edit url", "修改当前书签网址"),
+            ("delete", "命令行 y/N 确认删除"),
+            ("set corner right-up", "修改屏幕触角"),
+            ("backup", "输入备份文件路径，导出 JSON")
+        ]
+        for (index, example) in examples.enumerated() {
+            let y = 626 + CGFloat(index) * 17
+            D.text(":" + example.0, 64, y, size: 11.5, color: D.ink2, maxWidth: 370)
+            D.text(example.1, 460, y, size: 11.5, color: D.ink2, maxWidth: 540)
+            hit(NSRect(x: 64, y: y - 8, width: 936, height: 17), ":\(example.0)，\(example.1)", .draft(example.0))
+        }
+        let file = model.store.directory.appendingPathComponent("bookmarks.json").path
+        D.text("FILES: " + file, 64, 726, size: 10, color: D.muted, maxWidth: 1336)
+        hit(NSRect(x: 64, y: 716, width: 1336, height: 20), file)
+    }
+
+    private func drawLog() {
+        typealias D = TerminalDrawing
+        let start = min(max(0, model.bufferOffset), model.logs.count)
+        let end = min(model.logs.count, start + 32)
+        if model.logs.isEmpty { D.text("日志为空。", 72, 84, size: 12, color: D.muted) }
+        for index in start..<end {
+            let line = model.logs[index]
+            let y = 84 + CGFloat(index - start) * 20
+            D.text(String(format: "%03d", index + 1), 72, y, size: 10, color: D.muted)
+            D.text(line.time, 116, y, size: 11, color: D.muted, maxWidth: 70)
+            D.text(line.text, 190, y, size: 12, color: D.level(line.level), maxWidth: 1210)
+            hit(NSRect(x: 72, y: y - 10, width: 1328, height: 20), line.time + " " + line.text)
+        }
+        bufferPosition(start: start, end: end, count: model.logs.count)
+    }
+
+    private func drawJob() {
+        typealias D = TerminalDrawing
+        guard let job = model.job else {
+            D.text("尚无任务输出。使用 :backup 或 :restore 执行数据操作。", 72, 84, size: 12, color: D.muted)
+            return
+        }
+        D.text("TASK", 72, 84, size: 11, color: D.muted)
+        D.text(job.title, 150, 84, size: 13, bold: true, maxWidth: 880)
+        let label: String
+        let background: NSColor
+        switch job.status {
+        case .running: label = "RUNNING"; background = D.yellow
+        case .success: label = "DONE"; background = D.mint
+        case .failure: label = "ERROR"; background = D.red
+        }
+        let x = min(1050, 170 + D.width(job.title, size: 13, bold: true))
+        let width = D.width(label, size: 10, bold: true) + 12
+        D.rect(NSRect(x: x, y: 75, width: width, height: 18), background)
+        D.text(label, x + 6, 84, size: 10, color: job.status == .failure ? D.paper : D.ink, bold: true)
+        D.rule(72, 104, 1296)
+        let start = min(max(0, model.bufferOffset), job.lines.count)
+        let end = min(job.lines.count, start + 25)
+        for index in start..<end {
+            let line = job.lines[index]
+            let y = 132 + CGFloat(index - start) * 24
+            D.text(String(format: "%02d", index + 1), 72, y, size: 10, color: D.muted)
+            D.text(line.text, 116, y, size: 12.5, color: D.level(line.level), maxWidth: 1252)
+            hit(NSRect(x: 72, y: y - 12, width: 1296, height: 24), line.text)
+        }
+        if job.status == .running, end - start < 24 {
+            D.text("▊ 运行中…", 72, 142 + CGFloat(end - start) * 24, size: 12, color: D.amber)
+        }
+        D.text("命令与真实执行结果同时写入 :log。", 40, 728, size: 10, color: D.muted)
+        bufferPosition(start: start, end: end, count: job.lines.count)
+    }
+
+    private func drawAtlas() {
+        typealias D = TerminalDrawing
+        let start = min(max(0, model.bufferOffset), model.commands.count)
+        let end = min(model.commands.count, start + 18)
+        for column in 0..<3 {
+            let x = 60 + CGFloat(column) * 450
+            D.text("COMMANDS \(start + column * 6 + 1)–\(min(end, start + (column + 1) * 6))", x, 103, size: 10, color: D.ink2, bold: true)
+            D.rule(x, 118, 400)
+        }
+        for index in start..<end {
+            let position = index - start
+            let column = position / 6
+            let row = position % 6
+            let x = 60 + CGFloat(column) * 450
+            let y = 132 + CGFloat(row) * 62
+            let command = model.commands[index]
+            let selected = index == model.atlasIndex
+            if selected { D.rect(NSRect(x: x, y: y, width: 400, height: 54), D.ink) }
+            D.text(String(format: "%02d", index + 1), x + 4, y + 13, size: 9.5, color: selected ? D.yellow : D.muted)
+            D.text(":" + command.name, x + 34, y + 13, size: 11.5, color: selected ? D.paper : D.ink, bold: true, maxWidth: 278)
+            if selected { D.text("当前", x + 394, y + 13, size: 9, color: D.mint, align: .right) }
+            D.text(command.summary, x + 34, y + 34, size: 11, color: selected ? D.mint : D.muted, maxWidth: 358)
+            hit(NSRect(x: x, y: y, width: 400, height: 54), "\(command.usage)，\(command.summary)。\(command.detail)", .atlas(index), selected: selected)
+        }
+        D.rect(NSRect(x: 960, y: 550, width: 400, height: 104), D.surface)
+        D.text("当前项：墨黑底 + 鸦黄序号", 976, 574, size: 10.5, color: D.ink2)
+        D.text("点击或 Enter 执行；需要参数时", 976, 596, size: 10.5, color: D.muted)
+        D.text("在底部命令行继续输入。Esc 返回。", 976, 616, size: 10.5, color: D.muted)
+        D.text("滚轮 / PageUp / PageDown 查看其他命令。", 976, 636, size: 10.5, color: D.muted)
+        if model.commands.indices.contains(model.atlasIndex) {
+            let command = model.commands[model.atlasIndex]
+            D.text(command.usage, 64, 574, size: 13, color: D.teal, bold: true, maxWidth: 850)
+            D.text(command.detail.isEmpty ? command.summary : command.detail, 64, 604, size: 12, color: D.ink2, maxWidth: 850)
+        }
+        bufferPosition(start: start, end: end, count: model.commands.count)
+    }
+
+    private func bufferPosition(start: Int, end: Int, count: Int) {
+        guard start > 0 || end < count else { return }
+        TerminalDrawing.text("\(count == 0 ? 0 : start + 1)–\(end) / \(count) · 滚轮滚动", 1400, 728,
+                             size: 10, color: TerminalDrawing.muted, align: .right)
+    }
+}

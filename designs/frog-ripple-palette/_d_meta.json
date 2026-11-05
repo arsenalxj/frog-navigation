@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "青蛙导航 涟漪": {
+      "versions": [
+        {
+          "path": "青蛙导航 涟漪.html",
+          "createdAt": "2026-11-04T11:29:32+08:00",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-04T11:29:32+08:00",
+  "updatedAt": "2026-11-04T11:29:32+08:00"
+}

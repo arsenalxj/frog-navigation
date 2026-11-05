@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "青蛙导航 蛙眼轮盘": {
+      "versions": [
+        {
+          "path": "青蛙导航 蛙眼轮盘.html",
+          "createdAt": "2026-11-04T12:04:42+08:00",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-04T12:04:42+08:00",
+  "updatedAt": "2026-11-04T12:16:50+08:00"
+}

@@ -1,312 +1,601 @@
 import AppKit
+import Combine
 import FrogCore
-import SwiftUI
 
-struct LauncherView: View {
-    @ObservedObject var model: LauncherModel
-    @ObservedObject var store: BookmarkStore
+@MainActor
+final class LauncherView: NSView, NSTextFieldDelegate {
+    let model: LauncherModel
+    let input = NSTextField()
+    private var observation: AnyCancellable?
+    private var refreshQueued = false
+    private var inputRevision = -1
+    private var savedSelection: NSRange?
+    private var savedRevision = -1
+    private var wheelRemainder: CGFloat = 0
+    private var dragSource: String?
+    private var dragStart = NSPoint.zero
+    private var dragging = false
+    private var dropTarget: DropTarget?
+    private var mergeReady = false
+    private var mergeDelay: DispatchWorkItem?
+    private var accessibilityRows: [TerminalAccessibilityElement] = []
+    private var tooltipText: [NSView.ToolTipTag: String] = [:]
+    private var accessibilityNeedsRefresh = true
+    var regions: [Region] = []
 
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                backdrop
-                    .contentShape(Rectangle()).onTapGesture { model.backgroundClicked() }
-                    .zIndex(-1)
-                rootContent
-                    .scaleEffect(model.presented ? 1 : (model.reduceMotion ? 1 : 1.08))
-                    .opacity(model.presented ? 1 : 0)
-                    .allowsHitTesting(model.visible)
-                    .accessibilityHidden(!model.visible)
-                    .zIndex(0)
-                folderBackdrop.zIndex(1)
-                searchBar
-                    .padding(.top, max(35, model.metrics.size.height * 0.045))
-                    .frame(width: model.metrics.size.width, height: model.metrics.size.height, alignment: .top)
-                    .opacity(model.presented ? 1 : 0)
-                    .allowsHitTesting(model.visible)
-                    .accessibilityHidden(!model.visible)
-                    .zIndex(10)
-                if model.visible {
-                    if let group = expandedFolder {
-                        folder(group)
-                            .transition(.asymmetric(insertion: .scale(scale: model.reduceMotion ? 1 : 0.12, anchor: UnitPoint(x: model.folderOrigin.x, y: model.folderOrigin.y)).combined(with: .opacity), removal: .scale(scale: model.reduceMotion ? 1 : 0.6).combined(with: .opacity)))
-                            .zIndex(2)
-                    }
-                    if let item = model.dragItem {
-                        BookmarkTile(item: item, model: model, iconSize: model.metrics.icon, requestIcons: false, floating: true)
-                            .frame(width: model.metrics.cellWidth, height: model.metrics.icon + 50)
-                            .scaleEffect(1.12).opacity(0.96)
-                            .position(x: model.dragPoint.x, y: model.dragPoint.y + 16)
-                            .allowsHitTesting(false).zIndex(20)
-                    }
-                    notices.zIndex(40)
-                }
-                // 随原生窗口一起隐藏，保留表单挂载及焦点；不单独切换 SwiftUI 的可见性。
-                panelLayers.zIndex(30)
+    enum Action {
+        case item(Int), delete(Int), root, choice(Int), complete(String), draft(String), atlas(Int), command(String), input
+    }
+    struct Region {
+        let rect: NSRect
+        let label: String
+        let action: Action?
+        var selected = false
+    }
+    private struct DropTarget: Equatable {
+        let id: String?
+        let before: Bool
+        let merge: Bool
+        let row: Int?
+    }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    var scale: CGFloat { max(0.01, min(bounds.width / 1440, bounds.height / 900)) }
+    var canvasOrigin: NSPoint { NSPoint(x: (bounds.width - 1440 * scale) / 2, y: (bounds.height - 900 * scale) / 2) }
+    var rowsTop: CGFloat { model.showBreadcrumb ? 64 : 24 }
+
+    init(model: LauncherModel) {
+        self.model = model
+        super.init(frame: NSRect(x: 0, y: 0, width: 1440, height: 900))
+        input.isBordered = false
+        input.drawsBackground = false
+        input.focusRingType = .none
+        input.textColor = TerminalDrawing.ink
+        input.backgroundColor = .clear
+        input.isEditable = true
+        input.isSelectable = true
+        input.lineBreakMode = .byClipping
+        input.usesSingleLineMode = true
+        input.cell?.isScrollable = true
+        input.delegate = self
+        input.setAccessibilityLabel("命令行输入")
+        input.isHidden = true
+        addSubview(input)
+        setAccessibilityElement(false)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("青蛙导航 回声终端")
+        observation = Publishers.Merge(model.objectWillChange, model.store.objectWillChange).sink { [weak self] _ in
+            guard let self, !self.refreshQueued else { return }
+            self.refreshQueued = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.refreshQueued = false
+                self.synchronize()
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .coordinateSpace(name: "launcher")
-            .clipped()
-            .onAppear { model.layoutChanged(geometry.size) }
-            .onChange(of: geometry.size) { _, size in model.layoutChanged(size) }
-            .onChange(of: model.query) { _, _ in model.queryChanged() }
-            .onPreferenceChange(TileFramesKey.self) { model.frames = $0 }
         }
     }
 
-    private var expandedFolder: BookmarkGroup? {
-        guard model.visible, !model.searching, let folderID = model.folderID else { return nil }
-        return model.document.groups.first(where: { $0.id == folderID })
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        accessibilityNeedsRefresh = true
+        layoutInput()
+        needsDisplay = true
     }
 
-    private var folderIsOpen: Bool { expandedFolder != nil }
-
-    private var folderBackdrop: some View {
-        Color.black.opacity(folderIsOpen ? 0.1 : 0)
-            .contentShape(Rectangle())
-            .onTapGesture { model.backgroundClicked() }
-            .allowsHitTesting(folderIsOpen)
-            .accessibilityHidden(true)
-            .transaction { transaction in
-                transaction.animation = nil
-                transaction.disablesAnimations = true
-            }
+    private var inputX: CGFloat {
+        guard let prompt = model.prompt else { return 58 }
+        return min(480, 70 + TerminalDrawing.width(prompt.label, size: 13))
     }
 
-    @ViewBuilder private var backdrop: some View {
-        ZStack {
-            if model.reduceTransparency { Color(nsColor: .windowBackgroundColor).overlay(.black.opacity(0.4)) }
-            else if let image = model.wallpaper {
-                GeometryReader { geometry in
-                    Image(nsImage: image).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped()
+    private var commandHint: String {
+        if let prompt = model.prompt { return prompt.error ?? prompt.hint }
+        switch model.inputKind {
+        case .search: return "Enter 打开 · Esc 清空"
+        case .command: return "Tab 补全 · ↑↓ 历史 · Esc 取消"
+        default: return ""
+        }
+    }
+
+    private var hintWidth: CGFloat { min(510, TerminalDrawing.width(commandHint, size: 12)) }
+
+    private func layoutInput() {
+        let origin = canvasOrigin
+        // NSTextField 的单行文本不按控件中心垂直居中（实测比中心高约 4pt），
+        // 下移 4pt 让输入文字与命令行里的提示符、占位符共用一条视觉基线。
+        input.frame = NSRect(x: origin.x + inputX * scale, y: origin.y + 763 * scale,
+                             width: max(160, 1400 - hintWidth - 24 - inputX) * scale, height: 28 * scale)
+        input.font = TerminalDrawing.font(15.5 * scale)
+    }
+
+    private func synchronize() {
+        accessibilityNeedsRefresh = true
+        let revisionChanged = model.inputRevision != inputRevision
+        if revisionChanged {
+            savedSelection = nil
+            inputRevision = model.inputRevision
+        }
+        let editor = input.currentEditor() as? NSTextView
+        if input.stringValue != model.inputText, editor?.hasMarkedText() != true {
+            input.stringValue = model.inputText
+        }
+        input.isHidden = !model.isTextInputActive
+        input.setAccessibilityHelp(model.prompt?.hint ?? commandHint)
+        layoutInput()
+        if model.visible, window?.isKeyWindow == true {
+            if model.isTextInputActive {
+                if revisionChanged || window?.firstResponder === self {
+                    focusInput(selection: revisionChanged ? nil : savedSelection)
                 }
-                Color.black.opacity(0.22)
-                Color.white.opacity(0.04)
+            } else if editor != nil {
+                window?.makeFirstResponder(self)
+            }
+        }
+        if !model.isOrganizing || model.buffer != nil || model.prompt != nil { cancelDrag() }
+        needsDisplay = true
+    }
+
+    func prepareForHide() {
+        if let editor = input.currentEditor() as? NSTextView {
+            savedSelection = editor.selectedRange()
+            savedRevision = model.inputRevision
+        }
+        cancelDrag()
+    }
+
+    func restoreFocus() {
+        synchronize()
+        guard window?.isKeyWindow == true else { return }
+        if model.isTextInputActive {
+            focusInput(selection: savedRevision == model.inputRevision ? savedSelection : nil)
+        } else { window?.makeFirstResponder(self) }
+    }
+
+    private func focusInput(selection: NSRange?) {
+        guard model.isTextInputActive else { return }
+        window?.makeFirstResponder(input)
+        guard let editor = input.currentEditor() as? NSTextView, !editor.hasMarkedText() else { return }
+        editor.insertionPointColor = TerminalDrawing.amber
+        editor.drawsBackground = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.allowsUndo = true
+        let length = (input.stringValue as NSString).length
+        let range = selection ?? NSRange(location: length, length: 0)
+        let location = min(range.location, length)
+        editor.setSelectedRange(NSRange(location: location, length: min(range.length, length - location)))
+        editor.scrollRangeToVisible(editor.selectedRange())
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        model.updateInput(input.stringValue)
+        if let editor = input.currentEditor() as? NSTextView {
+            savedSelection = editor.selectedRange()
+            savedRevision = model.inputRevision
+        }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard !textView.hasMarkedText(), let event = NSApp.currentEvent, event.type == .keyDown else { return false }
+        return model.handleKey(event, isTextEditing: true)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if !model.handleKey(event, isTextEditing: false) { super.keyDown(with: event) }
+    }
+
+    private func designPoint(_ event: NSEvent) -> NSPoint {
+        let point = convert(event.locationInWindow, from: nil)
+        return NSPoint(x: (point.x - canvasOrigin.x) / scale, y: (point.y - canvasOrigin.y) / scale)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        cancelDrag()
+        let point = designPoint(event)
+        guard let hit = regions.last(where: { $0.rect.contains(point) }), let action = hit.action else { return }
+        if model.prompt != nil {
+            switch action {
+            case .choice, .input: break
+            default: return
+            }
+        }
+        if case let .item(index) = action,
+           model.isOrganizing, model.query.isEmpty, model.items.indices.contains(index), model.items[index].kind == .bookmark {
+            dragSource = model.items[index].id
+            dragStart = point
+        }
+        perform(action, activate: event.clickCount >= 2)
+    }
+
+    func perform(_ action: Action, activate: Bool = false) {
+        switch action {
+        case let .item(index):
+            model.selectItem(at: index)
+            if model.items.indices.contains(index), model.items[index].kind == .add || activate { model.activateSelection() }
+        case let .delete(index):
+            model.selectItem(at: index)
+            model.requestDeleteSelection()
+        case .root: model.closeFolder()
+        case let .choice(index): model.choosePromptOption(at: index)
+        case let .complete(command):
+            model.updateInput(command + " ")
+            input.stringValue = model.inputText
+            focusInput(selection: nil)
+        case let .draft(command):
+            model.startCommand()
+            model.updateInput(command + " ")
+            synchronize()
+        case let .atlas(index):
+            model.selectItem(at: index)
+            model.activateSelection()
+        case let .command(command): model.runCommand(command)
+        case .input:
+            if model.isTextInputActive {
+                focusInput(selection: (input.currentEditor() as? NSTextView)?.selectedRange() ?? savedSelection)
+            }
+            else if model.prompt == nil { model.startCommand() }
+        }
+        synchronize()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let source = dragSource, model.isOrganizing, model.prompt == nil else { return }
+        let point = designPoint(event)
+        guard dragging || hypot(point.x - dragStart.x, point.y - dragStart.y) > 5 else { return }
+        dragging = true
+        if point.y < rowsTop + 6 { model.scroll(rows: -1) }
+        else if point.y > rowsTop + CGFloat(model.visibleRowCount) * 32 - 6 { model.scroll(rows: 1) }
+        let target: DropTarget?
+        if model.showBreadcrumb, NSRect(x: 40, y: 24, width: 160, height: 40).contains(point) {
+            target = DropTarget(id: nil, before: false, merge: false, row: nil)
+        } else {
+            let row = Int(floor((point.y - rowsTop) / 32)) + model.scrollIndex
+            if point.x >= 46, point.x <= 1394, point.y >= rowsTop,
+               row >= model.scrollIndex, row < model.scrollIndex + model.visibleRowCount,
+               model.items.indices.contains(row), model.items[row].kind != .add, model.items[row].id != source {
+                let item = model.items[row]
+                let dy = point.y - rowsTop - CGFloat(row - model.scrollIndex) * 32
+                target = DropTarget(id: item.id, before: dy < 16,
+                                    merge: item.kind == .bookmark && model.folderID == nil && dy >= 9 && dy <= 23, row: row)
+            } else { target = nil }
+        }
+        if target != dropTarget {
+            mergeDelay?.cancel()
+            mergeReady = false
+            dropTarget = target
+            if target?.merge == true {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.dragging, self.dropTarget == target, self.model.visible else { return }
+                    self.mergeReady = true
+                    self.needsDisplay = true
+                }
+                mergeDelay = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: work)
+            }
+        }
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if dragging, let source = dragSource, let target = dropTarget {
+            model.dropBookmark(sourceID: source, targetID: target.id, before: target.before, merge: target.merge && mergeReady)
+        }
+        cancelDrag()
+    }
+
+    private func cancelDrag() {
+        mergeDelay?.cancel()
+        mergeDelay = nil
+        let hadDrag = dragging
+        dragSource = nil
+        dragging = false
+        dropTarget = nil
+        mergeReady = false
+        if hadDrag { needsDisplay = true }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard model.prompt == nil else { return }
+        if event.phase == .began { wheelRemainder = 0 }
+        wheelRemainder += event.hasPreciseScrollingDeltas ? -event.scrollingDeltaY / (32 * scale) : -event.scrollingDeltaY
+        let rows = Int(wheelRemainder)
+        if rows != 0 { wheelRemainder -= CGFloat(rows); model.scroll(rows: rows) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        TerminalDrawing.rect(bounds, TerminalDrawing.paper)
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.translateBy(x: canvasOrigin.x, y: canvasOrigin.y)
+        context.scaleBy(x: scale, y: scale)
+        context.clip(to: CGRect(x: 0, y: 0, width: 1440, height: 900))
+        regions.removeAll(keepingCapacity: true)
+        let showsOutput = model.buffer == nil || model.prompt != nil || model.inputKind != nil
+        if let buffer = model.buffer {
+            context.saveGState()
+            if showsOutput { context.clip(to: CGRect(x: 40, y: 24, width: 1360, height: 624)) }
+            drawBuffer(buffer)
+            context.restoreGState()
+            if showsOutput { regions.removeAll { $0.rect.maxY > 648 } }
+        } else { drawList() }
+        if showsOutput { drawOutput() }
+        drawChrome()
+        context.restoreGState()
+        refreshAccessibilityAndTooltips()
+    }
+
+    func hit(_ rect: NSRect, _ label: String, _ action: Action? = nil, selected: Bool = false) {
+        regions.append(Region(rect: rect, label: label, action: action, selected: selected))
+    }
+
+    private func drawList() {
+        typealias D = TerminalDrawing
+        if !model.store.isLoaded {
+            if model.store.isBusy {
+                D.text("载入书签数据…", 720, 392, size: 15, color: D.teal, align: .center)
+            } else if let issue = model.store.issue {
+                D.icon("warn", x: 702, y: 324, size: 36, color: D.red)
+                D.text("无法载入数据，原文件已保留", 720, 392, size: 15, color: D.red, bold: true, align: .center)
+                D.text(issue, 720, 420, size: 12, color: D.muted, maxWidth: 1120, align: .center)
+                D.text(":retry 重试", 680, 458, size: 12, color: D.teal, align: .right)
+                D.text(":cd 更换数据目录", 760, 458, size: 12, color: D.teal)
+                hit(NSRect(x: 160, y: 404, width: 1120, height: 30), issue)
+                hit(NSRect(x: 540, y: 442, width: 160, height: 32), "重试载入数据", .command("retry"))
+                hit(NSRect(x: 740, y: 442, width: 220, height: 32), "更换数据目录", .command("cd"))
+            }
+            return
+        }
+        if model.showBreadcrumb {
+            D.text("根目录", 46, 43, size: 12.5, color: D.green)
+            D.icon("chevron", x: 96, y: 35, color: D.muted)
+            D.text(model.folderName, 118, 43, size: 16, bold: true, maxWidth: 1100)
+            hit(NSRect(x: 40, y: 24, width: 68, height: 40), "返回根目录", .root)
+        }
+        let start = max(0, min(model.scrollIndex, model.items.count))
+        let end = min(model.items.count, start + model.visibleRowCount)
+        if start < end {
+            for index in start..<end { drawItem(model.items[index], index: index, y: rowsTop + CGFloat(index - start) * 32) }
+        }
+        if model.items.isEmpty || (model.items.count == 1 && model.items[0].kind == .add) {
+            if !model.query.isEmpty {
+                D.icon("search", x: 706, y: 324, size: 28, color: D.muted)
+                D.text("没有匹配的书签", 720, 388, size: 16, color: D.ink2, bold: true, align: .center)
+                D.text("Enter 打开网址或用默认浏览器搜索“\(model.query)”", 720, 420, size: 12, color: D.muted, maxWidth: 1000, align: .center)
             } else {
-                NativeMaterial(material: .underWindowBackground)
-                Color.black.opacity(0.22)
+                D.text("∅", 720, 352, size: 38, color: D.muted.withAlphaComponent(0.42), align: .center)
+                D.text(model.folderID == nil ? "还没有书签" : "文件夹为空", 720, 402, size: 15, color: D.ink2, bold: true, align: .center)
+                D.text("按 a 添加书签 · :restore 从备份恢复", 720, 428, size: 12, color: D.muted, align: .center)
             }
-        }.opacity(model.presented ? 1 : 0)
+        }
+        if model.items.count > model.visibleRowCount {
+            let trackHeight = CGFloat(model.visibleRowCount) * 32
+            D.rect(NSRect(x: 1404, y: rowsTop, width: 2, height: trackHeight), D.line)
+            let thumbHeight = max(20, trackHeight * CGFloat(model.visibleRowCount) / CGFloat(model.items.count))
+            let thumbY = rowsTop + (trackHeight - thumbHeight) * CGFloat(start) / CGFloat(max(1, model.items.count - model.visibleRowCount))
+            D.rect(NSRect(x: 1404, y: thumbY, width: 2, height: thumbHeight), D.muted)
+        }
+        drawDropTarget()
     }
 
-    private var rootContent: some View {
-        ZStack(alignment: .top) {
-            if !model.searching || !model.searchPages[0].isEmpty {
-                pageStack(pages: model.searching ? model.searchPages : model.rootPages, page: model.searching ? model.searchPage : model.rootPage, folder: false)
-                    .frame(height: model.metrics.height)
-                    .offset(y: model.metrics.top)
-                    .opacity(folderIsOpen ? 0.16 : 1)
-                    .blur(radius: folderIsOpen && !model.reduceMotion ? 3 : 0)
-                    .animation(nil, value: folderIsOpen)
-                    .allowsHitTesting(!folderIsOpen)
+    private func drawItem(_ item: TerminalItem, index: Int, y: CGFloat) {
+        typealias D = TerminalDrawing
+        let selected = index == model.selectedIndex
+        let foreground = selected ? D.paper : D.ink
+        let meta = selected ? D.mint : D.muted
+        let cy = y + 16
+        if selected {
+            D.rect(NSRect(x: 46, y: y + 1, width: 1348, height: 30), D.ink)
+            D.rect(NSRect(x: 46, y: y + 1, width: 3, height: 30), D.yellow)
+        }
+        hit(NSRect(x: 46, y: y, width: 1348, height: 32), "\(item.title)\(item.url.map { "，" + $0 } ?? "，" + item.detail)", .item(index), selected: selected)
+        if item.kind == .add {
+            D.icon("plus", x: 92, y: cy - 8, color: selected ? D.mint : D.green)
+            D.text("添加书签", 126, cy, color: selected ? D.mint : D.green, bold: true)
+            D.key("a", x: 1368, y: cy, dark: selected, size: 10)
+            return
+        }
+        if model.isOrganizing, item.kind == .bookmark {
+            D.text("[×]", 54, cy, size: 12, color: selected ? D.lemon : D.red, bold: true)
+            hit(NSRect(x: 46, y: y, width: 40, height: 32), "删除 \(item.title)", .delete(index))
+        } else {
+            let offset = model.items.first?.kind == .add ? 0 : 1
+            D.text(String(format: "%03d", index + offset), 82, cy, size: 11, color: selected ? D.yellow : D.muted, align: .right)
+        }
+        if item.kind == .folder {
+            D.icon("folder", x: 92, y: cy - 8, color: selected ? D.mint : D.purple)
+            D.text(item.title, 126, cy, color: selected ? D.paper : D.purple, bold: true, maxWidth: 1050)
+            D.text(item.detail + (model.isOrganizing ? " · 固定" : ""), 1390, cy, size: 11.5, color: meta, maxWidth: 180, align: .right)
+        } else {
+            D.tile(item, x: 92, y: cy)
+            let hostWidth = min(420, D.width(item.detail, size: 12))
+            let tag = model.query.isEmpty ? nil : item.groupName
+            let tagWidth = tag.map { min(220, D.width($0, size: 10)) + 10 } ?? 0
+            let titleWidth = max(90, 1390 - hostWidth - 18 - 126 - (tag == nil ? 0 : tagWidth + 12))
+            D.text(item.title, 126, cy, color: foreground, maxWidth: titleWidth)
+            if let tag {
+                let tagX = 136 + min(titleWidth, D.width(item.title, size: 14))
+                D.rect(NSRect(x: tagX, y: cy - 9, width: tagWidth, height: 18), D.line)
+                D.text(tag, tagX + 5, cy, size: 10, color: D.purple, maxWidth: tagWidth - 10)
+            }
+            D.text(item.detail, 1390, cy, size: 12, color: meta, maxWidth: hostWidth, align: .right)
+        }
+    }
+
+    private func drawDropTarget() {
+        guard dragging, let target = dropTarget else { return }
+        typealias D = TerminalDrawing
+        if let row = target.row, model.items.indices.contains(row) {
+            let y = rowsTop + CGFloat(row - model.scrollIndex) * 32
+            let item = model.items[row]
+            let label = item.kind == .folder ? "移入「\(item.title)」" : target.merge && mergeReady ? "＋ 创建文件夹" : target.merge ? "停留以创建文件夹" : "插入到此"
+            let width = min(500, D.width(label, size: 11) + 16)
+            D.green.setStroke()
+            NSBezierPath(rect: NSRect(x: 46, y: y + 1, width: 1348, height: 30)).stroke()
+            D.rule(46, target.before ? y : y + 31, 1348, color: D.green, height: 2)
+            D.rect(NSRect(x: 1394 - width, y: y - 20, width: width, height: 18), D.mint)
+            D.text(label, 1402 - width, y - 11, size: 11, color: D.pine, bold: true, maxWidth: width - 16)
+        } else {
+            D.rect(NSRect(x: 40, y: 24, width: 80, height: 36), D.mint)
+            D.text("移回根目录", 46, 43, size: 12, color: D.pine)
+        }
+    }
+
+    private func drawOutput() {
+        typealias D = TerminalDrawing
+        D.rect(NSRect(x: 40, y: 664, width: 1360, height: 72), D.paper)
+        D.rule(40, 664, 1360)
+        if let prompt = model.prompt {
+            D.rect(NSRect(x: 40, y: 665, width: 1360, height: 71), D.surface)
+            D.rect(NSRect(x: 40, y: 664, width: 3, height: 72), D.yellow)
+            D.text("PROMPT · \(prompt.command.uppercased())", 54, 678, size: 10.5, color: D.muted)
+            D.text(prompt.total > 0 ? "步骤 \(prompt.step + 1)/\(prompt.total) · Shift+Tab 返回 · Esc 取消" : "Esc 取消", 1390, 678, size: 10.5, color: D.muted, align: .right)
+            if !prompt.choices.isEmpty {
+                let start = max(0, prompt.selectedChoice - 2)
+                for index in start..<min(start + 3, prompt.choices.count) {
+                    let choice = prompt.choices[index]
+                    let y = 698 + CGFloat(index - start) * 14
+                    let selected = index == prompt.selectedChoice
+                    if selected { D.rect(NSRect(x: 40, y: y - 8, width: 1360, height: 16), D.ink) }
+                    D.text(String(format: "%02d", index + 1), 50, y, size: 11.5, color: selected ? D.yellow : D.muted)
+                    D.text(choice.label, 78, y, size: 12.5, color: selected ? D.paper : D.ink, maxWidth: 800)
+                    D.text(choice.detail, 1390, y, size: 11, color: selected ? D.mint : D.muted, maxWidth: 480, align: .right)
+                    hit(NSRect(x: 40, y: y - 7, width: 1360, height: 14), choice.label + " " + choice.detail, .choice(index), selected: selected)
+                }
             } else {
-                VStack(spacing: 9) {
-                    Text("没有匹配的书签").font(.system(size: 21, weight: .light))
-                    Text("按回车键打开网址或搜索 Google").font(.system(size: 13)).foregroundStyle(.white.opacity(0.68))
-                }.foregroundStyle(.white).frame(maxWidth: .infinity).offset(y: model.metrics.size.height * 0.35)
+                D.text(prompt.error ?? prompt.hint, 54, 700, size: 12.5, color: prompt.error == nil ? D.ink2 : D.red, maxWidth: 1320)
+                let context = prompt.context ?? "Enter 确认 · Esc 取消；未提交的输入会保留。"
+                D.text(context, 54, 718, size: 11.5, color: D.muted, maxWidth: 1320)
+                hit(NSRect(x: 54, y: 708, width: 1320, height: 24), context)
             }
-            PageDots(count: model.activePageCount, current: model.activePage) { model.setPage($0) }
-                .position(x: model.metrics.centerX, y: model.metrics.dotsY)
-                .opacity(folderIsOpen ? 0 : 1)
-                .animation(nil, value: folderIsOpen)
-                .allowsHitTesting(!folderIsOpen)
-                .accessibilityHidden(folderIsOpen)
-        }.frame(width: model.metrics.size.width, height: model.metrics.size.height, alignment: .top)
-    }
-
-    private var searchBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.8))
-                InitialFocusTextField(placeholder: "搜索", text: $model.query, label: "搜索书签",
-                                      font: .systemFont(ofSize: 13), color: .white, onSubmit: { model.submitSearch() },
-                                      focusToken: model.modalVisible ? nil : model.focusRequest)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .disabled(model.modalVisible)
-                    .accessibilityLabel("搜索书签")
-                if !model.query.isEmpty {
-                    Button { model.query = ""; model.focusRequest += 1 } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.65)) }
-                        .buttonStyle(.plain).accessibilityLabel("清空搜索")
-                }
-            }
-            .padding(.horizontal, 10).frame(width: 240, height: 29)
-            .background(.black.opacity(0.17), in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.26), lineWidth: 0.65))
-            .shadow(color: .black.opacity(0.08), radius: 1, y: 1)
-            Button { model.showSettings = true } label: {
-                Image(systemName: "gearshape").font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.86)).frame(width: 29, height: 29)
-            }.buttonStyle(.plain).help("设置（⌘,）").accessibilityLabel("设置")
-            Button { model.addBookmark() } label: {
-                Image(systemName: "plus").font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.86)).frame(width: 29, height: 29)
-            }.buttonStyle(.plain).help("添加书签（⌘N）").accessibilityLabel("添加书签")
+            return
         }
-        .offset(x: model.metrics.centerX - model.metrics.size.width / 2 + 39)
-    }
-
-    @ViewBuilder private func pageStack(pages: [[LaunchItem]], page: Int, folder: Bool) -> some View {
-        let viewport = folder ? min(620, model.metrics.usableWidth - 80) : model.metrics.size.width
-        let window = PageWindow(requestedPage: page, pageCount: pages.count)
-        ZStack(alignment: .top) {
-            ForEach(Array(window.indices), id: \.self) { index in
-                grid(items: pages[index], folder: folder, visible: index == window.current)
-                    .frame(width: viewport)
-                    .offset(x: CGFloat(index - window.current) * viewport + ((folder || model.folderID == nil || model.searching) ? model.pageOffset : 0) + (folder ? 0 : model.metrics.centerX - model.metrics.size.width / 2))
-                    .accessibilityHidden(index != window.current)
+        if let issue = model.store.issue, model.inputKind == nil {
+            D.text("DATA ERROR · 已保留现有数据", 40, 679, size: 10.5, color: D.red)
+            D.text(issue, 40, 700, size: 12.5, color: D.red, maxWidth: 1360)
+            D.text(":retry 重试载入 · :cd 更换数据目录 · :log 查看日志", 40, 720, size: 11.5, color: D.muted)
+            hit(NSRect(x: 40, y: 688, width: 1360, height: 24), issue)
+            return
+        }
+        if model.isOrganizing {
+            D.text("整理 / ORGANIZE", 40, 678, size: 11, color: D.green, bold: true)
+            D.text("j/k 选择 · Shift+↑/↓ 或 J/K 调整顺序 · m 移到文件夹 · D 删除确认", 40, 699, size: 13, color: D.ink2)
+            D.text("文件夹置顶且固定；拖动书签排序、移入文件夹，或在根书签中央停留创建文件夹。o / Esc 完成。", 40, 718, size: 12, color: D.muted)
+            return
+        }
+        let prefix = model.inputKind == .command && !model.inputText.contains(where: { $0.isWhitespace }) ? model.inputText.lowercased() : nil
+        let commands = prefix.map { prefix in model.commands.filter { $0.name.hasPrefix(prefix) }.prefix(3) }
+        D.text(commands?.isEmpty == false ? "COMMANDS · Tab 补全 · ↑↓ 历史" : "OUTPUT", 40, 679, size: 10.5, color: D.muted)
+        D.text(":log 查看全部", 1400, 679, size: 10.5, color: D.muted, align: .right)
+        hit(NSRect(x: 1280, y: 666, width: 120, height: 22), "查看全部日志", .command("log"))
+        if let commands, !commands.isEmpty {
+            for (index, command) in commands.enumerated() {
+                let y = 698 + CGFloat(index) * 16
+                D.text(String(format: "%02d", index + 1), 48, y, size: 11.5, color: D.muted)
+                D.text(":" + command.name, 74, y, size: 12.5)
+                D.text(command.summary, 1392, y, size: 11, color: D.muted, maxWidth: 1000, align: .right)
+                hit(NSRect(x: 40, y: y - 8, width: 1360, height: 16), command.usage + " " + command.summary, .complete(command.name))
+            }
+        } else if model.logs.isEmpty {
+            D.text("就绪。输入 : 打开命令，/ 搜索，a 添加，? 帮助。", 40, 704, size: 12, color: D.muted)
+        } else {
+            for (index, entry) in model.logs.suffix(3).enumerated() {
+                let y = 698 + CGFloat(index) * 16
+                D.text(entry.time, 40, y, size: 11.5, color: D.muted, maxWidth: 64)
+                D.text(entry.text, 106, y, size: 12.5, color: D.level(entry.level), maxWidth: 1294)
+                hit(NSRect(x: 106, y: y - 8, width: 1294, height: 16), entry.text)
             }
         }
-        .frame(width: viewport)
-        .padding(.vertical, 12)
-        .clipped()
-        .padding(.vertical, -12)
     }
 
-    private func grid(items: [LaunchItem], folder: Bool, visible: Bool) -> some View {
-        let columns = folder ? 3 : model.metrics.columns
-        let cellWidth = folder ? min(620, model.metrics.usableWidth - 80) / 3 : model.metrics.cellWidth
-        let cellHeight = folder ? min(146, (model.metrics.usableHeight - 300) / 3) : model.metrics.cellHeight
-        let rows = folder ? 3 : model.metrics.rows
-        return ZStack(alignment: .topLeading) {
-            Color.clear.contentShape(Rectangle()).onTapGesture { model.backgroundClicked() }
-            ForEach(items) { item in
-                let index = items.firstIndex(where: { $0.id == item.id }) ?? 0
-                cell(item, folder: folder, requestIcons: visible)
-                    .frame(width: cellWidth, height: cellHeight, alignment: .top)
-                    .position(x: (CGFloat(index % columns) + 0.5) * cellWidth,
-                              y: (CGFloat(index / columns) + 0.5) * cellHeight)
+    private func drawChrome() {
+        typealias D = TerminalDrawing
+        if model.prompt != nil {
+            D.rect(NSRect(x: 0, y: 752, width: 1440, height: 40), D.surface)
+            D.rect(NSRect(x: 0, y: 752, width: 3, height: 40), D.yellow)
+        }
+        D.rule(0, 752, 1440)
+        let symbol = model.inputKind == .search ? "/" : model.inputKind != nil || model.prompt != nil ? ":" : "›"
+        D.text(symbol, 40, 773, size: 17, color: model.inputKind == .search ? D.teal : model.inputKind != nil || model.prompt != nil ? D.amber : D.green, bold: true)
+        if let prompt = model.prompt { D.text(prompt.label, 58, 773, size: 13, color: D.muted, maxWidth: inputX - 70) }
+        if !model.isTextInputActive {
+            if model.prompt != nil { D.text(model.inputText, inputX, 773, size: 15.5, maxWidth: 1400 - inputX - hintWidth - 24) }
+            else {
+                D.rect(NSRect(x: inputX + 2, y: 764, width: 7, height: 18), D.amber)
+                D.text(model.buffer == .settings ? ": 输入命令 · :help 查看帮助" : ": 打开命令 · / 搜索 · ? 帮助", inputX + 16, 773, color: D.muted)
             }
         }
-        .frame(width: cellWidth * CGFloat(columns), height: cellHeight * CGFloat(rows), alignment: .topLeading)
-    }
-
-    @ViewBuilder private func cell(_ item: LaunchItem, folder: Bool, requestIcons: Bool) -> some View {
-        let iconSize = folder ? min(84, model.metrics.icon) : model.metrics.icon
-        Button { model.activate(item) } label: {
-            BookmarkTile(item: item, model: model, iconSize: iconSize, requestIcons: requestIcons)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .contentShape(Rectangle())
+        if !commandHint.isEmpty {
+            D.text(commandHint, 1400, 773, size: 12, color: model.prompt?.error == nil ? D.muted : D.red, maxWidth: hintWidth, align: .right)
+            hit(NSRect(x: 1400 - hintWidth, y: 752, width: hintWidth, height: 40), commandHint)
         }
-        .buttonStyle(.plain)
-        .opacity(model.dragItem?.id == item.id ? 0 : 1)
-        .accessibilityLabel(item.title)
-        .contextMenu { BookmarkContextMenu(item: item, model: model) }
-        .overlay(alignment: .top) {
-            if model.editing && item.movable && model.dragItem?.id != item.id {
-                Button { model.requestDelete(item) } label: {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color(white: 0.25)).frame(width: 23, height: 23)
-                        .background(.white.opacity(0.93), in: Circle())
-                        .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
-                }.buttonStyle(.plain).offset(x: -iconSize / 2, y: -3).accessibilityLabel("删除\(item.title)")
+        hit(NSRect(x: 40, y: 752, width: 1360 - hintWidth - 24, height: 40), "命令行输入", .input)
+        D.rect(NSRect(x: 0, y: 796, width: 1440, height: 36), D.forest)
+        D.text(model.modeLabel, 40, 815.5, size: 12.5, color: D.yellow, bold: true, maxWidth: 800)
+        if model.buffer == nil {
+            let location = model.query.isEmpty ? model.folderName : "“\(model.query)”"
+            let position = model.items.isEmpty ? "0/0" : "\(model.selectedIndex + 1)/\(model.items.count)"
+            let x = 72 + D.width(model.modeLabel, size: 12.5, bold: true)
+            D.text("· \(location) · \(position)", x, 815.5, size: 12.5,
+                   color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
+        }
+        D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · F1 地图 · ? 帮助", 1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
+        if model.buffer == nil {
+            var x: CGFloat = 40
+            for (key, label) in [("j / k", "移动"), ("/", "搜索"), (":", "命令"), ("a", "添加"), ("n", "新建文件夹"), ("e", "编辑"), ("m", "移动"), ("D", "删除"), ("o", "排序整理"), ("F1", "地图"), ("?", "帮助")] {
+                let width = D.key(key, x: x, y: 856)
+                D.text(label, x + width + 6, 856.5, size: 11.5, color: D.muted)
+                x += width + 24 + D.width(label, size: 11.5)
             }
         }
-        .background(frameReader(item, folder: folder))
-    }
-    private func frameReader(_ item: LaunchItem, folder: Bool) -> some View {
-        GeometryReader { proxy in Color.clear.preference(key: TileFramesKey.self, value: ["\(folder ? "folder" : "root")::\(item.id)": proxy.frame(in: .named("launcher"))]) }
     }
 
-    private func folder(_ group: BookmarkGroup) -> some View {
-        let width = min(620, model.metrics.usableWidth - 80)
-        let height = min(438, model.metrics.usableHeight - 300)
-        return ZStack {
-            VStack(spacing: 20) {
-                if model.renamingID == group.id {
-                    VStack(spacing: 6) {
-                        InitialFocusTextField(placeholder: "文件夹名称", text: $model.renameText, label: "文件夹名称",
-                                              font: .systemFont(ofSize: 29, weight: .light), color: .white, alignment: .center,
-                                              onSubmit: { model.saveRename() }, focusToken: model.renameFocusToken)
-                            .disabled(model.renameFocusToken == nil)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(width: min(350, width - 40)).padding(.vertical, 4)
-                            .background(.white.opacity(0.13), in: RoundedRectangle(cornerRadius: 7))
-                            .accessibilityLabel("文件夹名称")
-                        if let error = model.renameError { Text(error).font(.system(size: 12)).foregroundStyle(.white) }
+    private func refreshAccessibilityAndTooltips() {
+        guard accessibilityNeedsRefresh else { return }
+        accessibilityNeedsRefresh = false
+        removeAllToolTips()
+        tooltipText.removeAll(keepingCapacity: true)
+        accessibilityRows.removeAll(keepingCapacity: true)
+        guard let window else { return }
+        for region in regions {
+            let rect = NSRect(x: canvasOrigin.x + region.rect.minX * scale, y: canvasOrigin.y + region.rect.minY * scale,
+                              width: region.rect.width * scale, height: region.rect.height * scale)
+            let tag = addToolTip(rect, owner: self, userData: nil)
+            tooltipText[tag] = region.label
+            let element = TerminalAccessibilityElement()
+            element.setAccessibilityParent(self)
+            element.setAccessibilityRole(region.action == nil ? .staticText : .button)
+            element.setAccessibilityLabel(region.label)
+            element.setAccessibilityFrame(window.convertToScreen(convert(rect, to: nil)))
+            if region.selected { element.setAccessibilityValue("已选择") }
+            if let action = region.action {
+                element.press = { [weak self] in
+                    guard let self else { return false }
+                    if self.model.prompt != nil {
+                        switch action { case .choice, .input: break; default: return false }
                     }
-                } else {
-                    Button { model.rename(group) } label: {
-                        Text(group.name).font(.system(size: 29, weight: .light)).foregroundStyle(.white)
-                            .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
-                            .lineLimit(1).padding(.horizontal, 20)
-                    }.buttonStyle(.plain).help("重命名文件夹")
+                    self.perform(action, activate: true)
+                    return true
                 }
-                VStack(spacing: 8) {
-                    pageStack(pages: model.folderPages, page: model.folderPage, folder: true).frame(height: height)
-                    PageDots(count: model.folderPages.count, current: model.folderPage) { model.setPage($0) }
-                        .padding(.bottom, 17)
-                }
-                .padding(.top, 26)
-                .frame(width: width)
-                .background {
-                    if model.reduceTransparency { RoundedRectangle(cornerRadius: 30).fill(Color(white: 0.3)) }
-                    else { RoundedRectangle(cornerRadius: 30).fill(.regularMaterial).environment(\.colorScheme, .dark) }
-                }
-                .overlay(RoundedRectangle(cornerRadius: 30).stroke(.white.opacity(0.18), lineWidth: 0.7))
-                .shadow(color: .black.opacity(0.16), radius: 24, y: 10)
-                .background(GeometryReader { proxy in
-                    Color.clear.onAppear { model.folderFrame = proxy.frame(in: .named("launcher")) }
-                        .onChange(of: proxy.frame(in: .named("launcher"))) { _, frame in model.folderFrame = frame }
-                })
-            }.offset(x: model.metrics.centerX - model.metrics.size.width / 2, y: -12 - model.metrics.dockInsets.bottom / 2)
+            }
+            accessibilityRows.append(element)
         }
-        // 保持屏幕坐标中的展开锚点；全屏遮罩由独立层立即切换。
-        .frame(width: model.metrics.size.width, height: model.metrics.size.height)
+        var children: [Any] = accessibilityRows
+        if !input.isHidden { children.append(input) }
+        setAccessibilityChildren(children)
     }
 
-    @ViewBuilder private var panelLayers: some View {
-        if model.showSettings || model.showEditor || model.deleteTarget != nil || (model.renamingID != nil && model.renamingID != model.folderID) {
-            Color.black.opacity(0.28).contentShape(Rectangle()).onTapGesture {}
-            if model.showSettings { SettingsPanel(model: model, store: store, login: model.login) }
-            if model.showEditor { BookmarkEditorPanel(model: model, store: store) }
-            if let target = model.deleteTarget { DeletePanel(model: model, target: target, busy: store.isBusy) }
-            if model.renamingID != nil && model.renamingID != model.folderID { RenamePanel(model: model, busy: store.isBusy) }
-        }
-    }
-    @ViewBuilder private var notices: some View {
-        VStack {
-            if let issue = store.issue {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(issue).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
-                    Button("重试") { Task { await store.reloadIfChanged() } }.disabled(store.isBusy)
-                    Button("设置") { model.showSettings = true }
-                }.padding(12).frame(maxWidth: 650).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 11))
-                    .padding(.top, 76)
-            }
-            Spacer()
-            if let toast = model.toast {
-                Text(toast).font(.system(size: 13)).multilineTextAlignment(.center)
-                    .padding(.horizontal, 20).padding(.vertical, 11).frame(maxWidth: 650)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    .padding(.bottom, 144)
-            }
-        }.allowsHitTesting(store.issue != nil)
+    @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+                       userData data: UnsafeMutableRawPointer?) -> String {
+        tooltipText[tag] ?? ""
     }
 }
 
-struct PageDots: View {
-    let count: Int
-    let current: Int
-    let select: (Int) -> Void
-    var body: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<max(1, count), id: \.self) { index in
-                Button { select(index) } label: {
-                    Circle().fill(.white.opacity(index == current ? 0.95 : 0.34)).frame(width: 7, height: 7).frame(width: 19, height: 23)
-                }.buttonStyle(.plain).accessibilityLabel("第 \(index + 1) 页，共 \(count) 页").accessibilityAddTraits(index == current ? .isSelected : [])
-            }
-        }
-    }
-}
-
-struct NativeMaterial: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView(); view.material = material; view.blendingMode = .behindWindow; view.state = .active
-        return view
-    }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) { view.material = material }
+@MainActor
+private final class TerminalAccessibilityElement: NSAccessibilityElement {
+    var press: (() -> Bool)?
+    override func accessibilityPerformPress() -> Bool { press?() ?? false }
 }

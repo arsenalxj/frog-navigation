@@ -7,7 +7,6 @@
 
 /* Begin PBXBuildFile section */
 		100000000000000000000001 /* FrogCore in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000051 /* FrogCore */; };
-		100000000000000000000002 /* FrogIcons in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000052 /* FrogIcons */; };
 		100000000000000000000003 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000012 /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
@@ -33,7 +32,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000001 /* FrogCore in Frameworks */,
-				100000000000000000000002 /* FrogIcons in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,7 +72,7 @@
 			dependencies = ();
 			fileSystemSynchronizedGroups = (100000000000000000000020 /* Frog */);
 			name = Frog;
-			packageProductDependencies = (100000000000000000000051 /* FrogCore */, 100000000000000000000052 /* FrogIcons */);
+			packageProductDependencies = (100000000000000000000051 /* FrogCore */);
 			productName = Frog;
 			productReference = 100000000000000000000010 /* 青蛙导航.app */;
 			productType = "com.apple.product-type.application";
@@ -205,7 +203,6 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		100000000000000000000051 /* FrogCore */ = {isa = XCSwiftPackageProductDependency; package = 100000000000000000000050 /* XCLocalSwiftPackageReference "." */; productName = FrogCore; };
-		100000000000000000000052 /* FrogIcons */ = {isa = XCSwiftPackageProductDependency; package = 100000000000000000000050 /* XCLocalSwiftPackageReference "." */; productName = FrogIcons; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 100000000000000000000041 /* Project object */;

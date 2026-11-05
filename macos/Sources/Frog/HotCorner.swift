@@ -5,10 +5,10 @@ enum ScreenCorner: String, Codable, CaseIterable {
     case topLeft, bottomLeft, topRight, bottomRight
     var title: String {
         switch self {
-        case .topLeft: return "左上"
-        case .bottomLeft: return "左下"
-        case .topRight: return "右上"
-        case .bottomRight: return "右下"
+        case .topLeft: return "left-up"
+        case .bottomLeft: return "left-down"
+        case .topRight: return "right-up"
+        case .bottomRight: return "right-down"
         }
     }
     func contains(_ point: CGPoint, in frame: CGRect, size: CGFloat) -> Bool {

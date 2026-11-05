@@ -120,7 +120,7 @@ def launch(args):
     architecture = subprocess.check_output(["/usr/bin/lipo", "-archs", str(executable)], text=True).strip()
     if architecture != "arm64":
         raise RuntimeError(f"验收要求 arm64 Release，当前架构为 {architecture}。")
-    # 只创建脚本自己的测试目录；应用的目录记忆和页码均由隔离参数关闭。
+    # 只创建脚本自己的测试目录；数据目录与本机偏好均由隔离参数保护。
     fixture = make_fixture(Path(tempfile.mkdtemp(prefix="frog-perf-")), args.count)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     output = MACOS_DIR / "build/performance" / f"{stamp}-{os.getpid()}"
@@ -130,11 +130,11 @@ def launch(args):
     with log_path.open("wb") as log:
         started_ns = time.monotonic_ns()
         process = subprocess.Popen([str(executable), "--data-directory", str(fixture),
-                                    "--offline", "--diagnostics"], stdout=log, stderr=log,
+                                    "--diagnostics"], stdout=log, stderr=log,
                                    start_new_session=True)
     run = {"created_at": datetime.datetime.now().astimezone().isoformat(),
            "pid": process.pid, "app": str(app), "data_directory": str(fixture),
-           "bookmark_count": args.count, "offline": True, "architecture": architecture,
+           "bookmark_count": args.count, "architecture": architecture,
            "os": platform.platform(), "log_path": str(log_path),
            "ignored_same_name_processes": ignored,
            "launch_method": "直接执行 Release .app 内二进制；包含进程创建和动态装载时间",

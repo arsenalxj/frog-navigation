@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>青蛙导航 · 蛙眼轮盘 — 键盘优先雷达表盘原型</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+/* ===== 设计令牌 ===== */
+:root{
+  --frog:#A8D08A;
+  --frog-deep:#7FB35A;
+  --olive:#3E4634;
+  --cream:#FAF5E4;
+  --pink:#F2A68C;
+  --ink:#EDEFE6;
+  --ink-dim:rgba(237,239,230,0.52);
+  --ink-faint:rgba(237,239,230,0.32);
+  --line:rgba(168,208,138,0.16);
+  --spring:cubic-bezier(0.32,0.72,0.35,1);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body,#root{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;
+  color:var(--ink);
+  background:
+    radial-gradient(1180px 880px at 50% 40%, #132419 0%, #0E1811 46%, #0B120D 78%),
+    #0B120D;
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ===== 舞台：深潭，无卡片 ===== */
+.stage{
+  position:relative;
+  width:100vw;
+  height:100vh;
+  overflow:hidden;
+  isolation:isolate;
+}
+.stage::after{
+  content:"";
+  position:absolute;inset:0;
+  background:radial-gradient(125% 105% at 50% 42%, transparent 48%, rgba(0,0,0,0.42) 100%);
+  pointer-events:none;
+  z-index:1;
+}
+
+/* ===== 左上品牌 ===== */
+.brand{
+  position:absolute;
+  top:32px;left:40px;
+  display:flex;align-items:center;gap:12px;
+  z-index:20;
+}
+.brand .frog{
+  width:28px;height:28px;
+  filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));
+}
+.brand-text{display:flex;flex-direction:column;gap:3px}
+.brand-name{
+  font-size:14px;font-weight:700;letter-spacing:1.4px;
+  color:var(--cream);
+}
+.brand-sub{
+  font-size:9px;font-weight:600;letter-spacing:3.4px;
+  color:rgba(168,208,138,0.55);
+  text-transform:uppercase;
+}
+
+/* ===== 右上泳道胶囊 ===== */
+.lane-pill{
+  position:absolute;
+  top:30px;right:40px;
+  display:flex;align-items:center;gap:9px;
+  height:32px;padding:0 13px;
+  border-radius:999px;
+  background:rgba(250,245,228,0.04);
+  border:1px solid rgba(168,208,138,0.16);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  z-index:20;
+  font-size:12px;
+  letter-spacing:0.4px;
+}
+.lane-pill .dot{
+  width:5px;height:5px;border-radius:50%;
+  background:var(--frog);
+  box-shadow:0 0 8px rgba(168,208,138,0.8);
+  flex:none;
+}
+.lane-pill .lp-name{color:var(--ink);font-weight:600}
+.lane-pill .lp-count{
+  font-size:10.5px;font-weight:700;
+  color:var(--frog);
+  background:rgba(168,208,138,0.12);
+  border:1px solid rgba(168,208,138,0.2);
+  border-radius:999px;
+  padding:2px 7px;
+  min-width:22px;text-align:center;
+}
+
+/* ===== 表盘 ===== */
+.dial-wrap{
+  position:absolute;
+  left:50%;
+  top:calc(50% - 44px);
+  transform:translate(-50%,-50%);
+  width:min(78vh,720px,calc(100vw - 128px));
+  height:min(78vh,720px,calc(100vw - 128px));
+  z-index:2;
+}
+.dial{width:100%;height:100%;display:block;overflow:visible}
+.orbit{fill:none;stroke:rgba(168,208,138,0.07);stroke-dasharray:2 9}
+.tick{stroke:var(--frog);stroke-linecap:round}
+.tick.minor{opacity:0.18}
+.tick.major{opacity:0.38}
+.dial-rotator{
+  transition:transform 0.26s var(--spring);
+  transform-box:view-box;
+  transform-origin:360px 360px;
+}
+.sel-arc{
+  fill:none;
+  stroke:var(--frog);
+  stroke-width:3;
+  stroke-linecap:round;
+  filter:url(#glowSoft);
+}
+.guide{
+  stroke:url(#guideFade);
+  stroke-width:1.4;
+  stroke-linecap:round;
+}
+.lane-layer{
+  transform-box:view-box;
+  transform-origin:360px 360px;
+  animation:laneIn 0.26s var(--spring);
+}
+@keyframes laneIn{
+  from{opacity:0;transform:rotate(-7deg) scale(0.965)}
+  to{opacity:1;transform:rotate(0deg) scale(1)}
+}
+.node-item{cursor:pointer;transition:transform 0.26s var(--spring)}
+.node-dot{transition:r 0.22s var(--spring), fill 0.22s var(--spring), stroke 0.22s var(--spring)}
+.node-letter{
+  font-size:13px;font-weight:700;
+  fill:rgba(237,239,230,0.8);
+  pointer-events:none;user-select:none;
+  letter-spacing:0.2px;
+}
+.node-letter.is-active{fill:#101A11}
+.node-label{
+  font-size:12px;
+  fill:rgba(237,239,230,0.6);
+  letter-spacing:0.4px;
+  pointer-events:none;user-select:none;
+  transition:fill 0.2s, font-size 0.2s;
+}
+.node-label.is-active{
+  fill:var(--frog);
+  font-size:14px;font-weight:700;
+  filter:drop-shadow(0 0 7px rgba(168,208,138,0.55));
+}
+.group-seg{
+  cursor:pointer;
+  transition:fill 0.22s var(--spring), stroke 0.22s var(--spring), opacity 0.22s var(--spring);
+}
+.group-seg.is-muted{opacity:0.26;pointer-events:none;cursor:default}
+.group-label{
+  font-size:10.5px;
+  fill:rgba(237,239,230,0.46);
+  letter-spacing:0.6px;
+  pointer-events:none;user-select:none;
+  transition:fill 0.22s;
+}
+.group-label.is-active{fill:var(--frog);font-weight:700}
+.group-label.is-hover{fill:rgba(237,239,230,0.62)}
+.group-label.is-muted{opacity:0.32}
+.eye-blink{
+  transform-box:fill-box;
+  transform-origin:center;
+  animation:eyeBlink 6s 1.4s infinite;
+}
+@keyframes eyeBlink{
+  0%,92%,100%{transform:scaleY(1)}
+  94%{transform:scaleY(0.08)}
+  96%{transform:scaleY(1)}
+}
+.pupil{transition:transform 0.26s var(--spring)}
+.pulse{
+  fill:none;
+  stroke:var(--frog);
+  stroke-width:2;
+  transform-box:fill-box;
+  transform-origin:center;
+  animation:pulseOut 0.62s ease-out forwards;
+  pointer-events:none;
+}
+@keyframes pulseOut{
+  from{opacity:0.55;transform:scale(1)}
+  to{opacity:0;transform:scale(2.3)}
+}
+.empty-copy{
+  font-size:11.5px;
+  fill:rgba(237,239,230,0.3);
+  letter-spacing:1.2px;
+}
+.overflow-badge{
+  position:absolute;
+  right:2.5%;bottom:7%;
+  font-size:11px;font-weight:700;
+  letter-spacing:0.5px;
+  color:var(--frog);
+  background:rgba(168,208,138,0.1);
+  border:1px solid rgba(168,208,138,0.22);
+  border-radius:999px;
+  padding:3px 8px;
+  pointer-events:none;
+  backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);
+}
+
+/* ===== 搜索条 ===== */
+.dock{
+  position:absolute;
+  left:50%;bottom:74px;
+  transform:translateX(-50%);
+  width:380px;
+  z-index:20;
+}
+.search{
+  width:100%;height:40px;
+  border-radius:10px;
+  display:flex;align-items:center;gap:10px;
+  padding:0 14px;
+  background:rgba(250,245,228,0.05);
+  border:1px solid rgba(168,208,138,0.16);
+  backdrop-filter:blur(16px) saturate(1.25);
+  -webkit-backdrop-filter:blur(16px) saturate(1.25);
+  box-shadow:0 14px 38px rgba(0,0,0,0.4);
+  transition:border-color 0.22s var(--spring), box-shadow 0.22s var(--spring), background 0.22s var(--spring);
+  cursor:text;
+}
+.search>svg{color:var(--ink-faint);flex:none}
+.search input{
+  flex:1;min-width:0;
+  background:none;border:none;outline:none;
+  color:var(--ink);
+  font-size:13px;letter-spacing:0.3px;
+  font-family:inherit;
+}
+.search input::placeholder{color:var(--ink-faint)}
+.search.is-focus{
+  border-color:rgba(168,208,138,0.62);
+  background:rgba(250,245,228,0.07);
+  box-shadow:0 0 0 3px rgba(168,208,138,0.12), 0 14px 38px rgba(0,0,0,0.42);
+}
+.search .esc{
+  flex:none;
+  font-size:10.5px;color:var(--ink-faint);
+  letter-spacing:0.5px;
+}
+
+/* ===== 键帽 ===== */
+kbd{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:18px;height:18px;padding:0 5px;
+  border-radius:5px;
+  border:1px solid rgba(250,245,228,0.16);
+  border-bottom-width:2px;
+  background:rgba(250,245,228,0.05);
+  color:rgba(250,245,228,0.86);
+  font:600 10px/1 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  letter-spacing:0.3px;
+}
+
+/* ===== 页脚键位提示条 ===== */
+.hints{
+  position:absolute;
+  left:50%;bottom:26px;
+  transform:translateX(-50%);
+  display:flex;align-items:center;gap:9px;
+  padding:7px 15px;
+  border-radius:12px;
+  background:rgba(11,18,13,0.5);
+  border:1px solid rgba(168,208,138,0.11);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  font-size:11.5px;color:var(--ink-dim);
+  white-space:nowrap;
+  z-index:20;
+}
+.hints span{display:inline-flex;align-items:center;gap:5px}
+.hints i{color:rgba(237,239,230,0.22);font-style:normal}
+
+/* ===== Toast ===== */
+.toast{
+  position:fixed;top:22px;left:50%;
+  transform:translateX(-50%);
+  z-index:60;
+  display:flex;align-items:center;gap:8px;
+  padding:10px 18px;
+  border-radius:999px;
+  background:rgba(22,33,26,0.74);
+  border:1px solid rgba(168,208,138,0.28);
+  backdrop-filter:blur(14px) saturate(1.2);
+  -webkit-backdrop-filter:blur(14px) saturate(1.2);
+  box-shadow:0 14px 40px rgba(0,0,0,0.45);
+  color:var(--cream);
+  font-size:13px;font-weight:600;letter-spacing:0.3px;
+  animation:toastIn 0.28s var(--spring);
+  pointer-events:none;
+  max-width:70vw;
+}
+.toast svg{color:var(--frog);flex:none}
+.toast em{font-style:normal;color:var(--frog)}
+@keyframes toastIn{
+  from{opacity:0;transform:translate(-50%,-10px)}
+  to{opacity:1;transform:translate(-50%,0)}
+}
+</style>
+</head>
+<body data-appearance="dark">
+<div id="root"></div>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
