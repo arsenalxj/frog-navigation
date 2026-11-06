@@ -1,75 +1,85 @@
 # Windows 当前验证
 
-内部身份已统一为 Frog。旧身份的原始验收记录归档到项目同级 `frog-navigation-history/20260915-051305/`，不作为本次身份变更的验证结果。
+## 2026-11-06：原生回声终端重构
 
-2026-09-15 检查结果：
+本轮以 macOS 当前终端实现为基准，将旧网格启动台替换为 Win32 / Direct2D / DirectWrite 原生终端。按用户要求不包含 Windows 文件夹快跳；macOS Finder 功能不变。旧图标缓存、壁纸和分页模块已退役，旧版验收结果不代表当前版本。
 
-- CMake 源文件路径、资源和安装打包路径一致；PowerShell 文件保持 UTF-8 BOM。
-- 当前 `frog-bookmarks` fixture 已通过 macOS FrogCore 解码与往返测试。
-- Windows x64 Release 已在 MSVC 19.51 / Visual Studio 2026 环境构建成功。
-- CTest 全部通过：`core`、`image-cache`、`native-smoke`，共 3 项；原生运行测试使用隔离数据目录。
-- ZIP 解包与 Release 可执行文件一致性、ASCII 文件名、隔离首次安装、更新、旧版中文可执行名升级、未知目录保护、卸载及隔离数据保留检查全部通过；报告位于 `build/verification/package-report.json`。
-- 本次图标修复已完成真实数据副本与 1,000 书签的性能采样，结果见下文；完整人工交互验收及本次版本的正式安装尚未执行。
+### 构建和交互结果
 
-在 Windows 项目根目录运行：
+Windows 11 10.0.26100、MSVC x64 Release 构建成功。执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/build.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/verify-package.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/build.ps1 -SkipPackage
+powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/measure-performance.ps1
 ```
 
-以上结果来自本次 Windows 构建及隔离检查，不继承旧身份的验证结论。
+CTest **3/3 通过**：`core`、`terminal-features`、`native-smoke`。本轮最终测试总耗时 10.09 秒，原生交互验收 9.69 秒。
 
-## Windows 交付命名
+- `core`：macOS 数据契约、模型变更、原子存储、外部冲突、监听及热键相关行为。
+- `terminal-features`：计算器表达式与错误边界、Edge 书签转换和去重、多配置校验及损坏数据拒绝。
+- `native-smoke`：启动真实 `Frog.exe`，使用隔离数据、真实键鼠 `SendInput`、UI Automation、磁盘断言与窗口截图；不是仅调用内部方法的模拟。
 
-可执行文件为 `Frog.exe`，ZIP 为 `Frog-windows-x64.zip`，解压根目录为 `Frog/`。CMake、版本资源、构建／安装／卸载／性能脚本、文档已同步；安装包验证同时检查 ZIP 文件名和全部条目名仅含 ASCII。安装脚本继续识别旧版中文可执行名以完成升级，交付内容使用英文名。
+原生运行已覆盖：
 
-本次已在 Windows 环境重新构建，并通过安装包验证。
+1. 后台延迟创建窗口、单实例唤起与首次绘制。
+2. 文件夹树形展开、搜索结果点击、原生与 UIA 焦点一致性。
+3. 三步添加、回退、收起后草稿和光标选区保留。
+4. 双字段编辑、取消、校验失败、写入失败保留与重试。
+5. 网址剪贴板、外部修改冲突及明确重试。
+6. 同组排序、删除确认与取消。
+7. 移动时创建新文件夹、重命名、移回根目录、删除空文件夹、真实鼠标拖入文件夹。
+8. 计算器表达式、历史、复制、错误，以及设置、帮助、日志缓冲区。
+9. 备份、恢复、数据目录切换的真实文件结果。
+10. 真实格式 Edge fixture 导入、源文件只读和重复导入去重。
+11. 搜索收起清理、编辑草稿保留与正常退出。
 
-## SVG 图标与网站直连
+验收发现并修复后台文件刷新阻断提交、UIA/COM 嵌套消息泵绕过主循环按键处理的问题。测试中的连续同位置单击按 Windows 双击阈值分隔，避免将单击选择误变成双击打开浏览器；没有改变产品双击打开行为。
 
-2026-09-15 增加 Direct2D SVG 解码，并移除 Google S2 图标兜底。已补充路径渲染、透明度、viewBox 居中裁剪、PNG 往返、无效尺寸与离线缓存测试；网络验收程序加入 DeepSeek 平台链接并强制刷新。
+### 界面证据
 
-远端开发时已核对 Microsoft SDK 的 SVG API 声明、链接依赖及源码差异。合入后已在 Windows/MSVC 环境重新构建 x64 Release，CTest 的 `core`（含新增 SVG 测试）与 `native-smoke` 全部通过。上述 ZIP 与隔离安装验证完成于合入 SVG 更新之前，当时合并验证使用 `-SkipPackage`；本次图标缓存修复已重新生成包含这些功能的 ZIP。下列三个网站的强制下载专项检查尚未单独执行，可运行：
+已查看实际原生截图，包含展开树、计算器历史及设置界面。最新证据位于忽略目录 `build/Testing/artifacts/`：
 
-```powershell
-.\windows\build\Release\FrogIconProbe.exe windows/build/verification/network
-```
+- `application.jsonl`：本轮状态、保存、外部更新与绘制事件。
+- `tree-expanded.png`、`tree-reordered.png`：树形列表和整理。
+- `add-draft.png`、`edit-failure-retains-fields.png`：提示流与失败保留。
+- `calculator-history.png`、`settings.png`、`help.png`、`log.png`。
+- `edge-import.png`、`terminal-final.png`。
 
-检查生成的 `network-report.json` 中三个网站均加载成功，并查看隔离缓存中的 DeepSeek PNG 是否正确显示鲸鱼轮廓及透明背景。
+目录内可能保留旧启动台截图，它们不属于本轮证据。测试输出见 `build/Testing/Temporary/LastTest.log`。
 
-## 缓存加载与收起后复用
+### 性能实测
 
-2026-09-15：新增 1 个专用缓存线程，保留 2 个慢任务线程；正常收起保留有效 Direct2D 表面、图标和壁纸，图标位图最多 128 张并按最近使用情况淘汰。详见 [图标缓存方案](../plans/PLAN_WINDOWS_ICON_CACHE.md)。
+性能脚本生成 **1,000 个隔离书签**，启动独立进程；没有清空系统文件缓存。硬件为 i7-13700HX、32 GiB 内存，显示设备包含 GameViewer 虚拟显示适配器及 AMD Radeon HD 7670。
 
-自动化验证：
+| 测量项 | 本轮结果 |
+| --- | ---: |
+| 进程启动至可操作 | 229.54 ms |
+| 应用内部首次绘制 | 112.14 ms |
+| 三次重新展开 | 11.09 / 13.36 / 12.39 ms |
+| 收起后私有提交 | 31,772,672 字节（约 30.30 MiB） |
+| 收起后工作集 | 53,346,304 字节（约 50.88 MiB） |
+| 空闲平均 CPU | 0% |
+| GDI / USER 对象 | 21 / 29 |
 
-- `image-cache` 在本机 HTTP 服务确认两个网络请求等待响应之后提交缓存请求，验证缓存能在网络响应释放前完成；同时覆盖暂停与重开、重复请求、尺寸升级、旧下载丢弃、损坏缓存恢复、刷新失败保留旧缓存、队列上限及可重试结果。
-- `native-smoke` 使用 181 个书签及预置 PNG，确认连续重开首帧使用真实位图、绘制表面不重建、已有位图不重复读盘；遍历所有页面触发 128 张上限，再返回首页验证被淘汰图标重新加载。
-- 用带合法 RECT 的 `WM_DPICHANGED` 消息触发重建，确认图标恢复和绘制表面代次增加；原有中文表单、草稿、冲突、拖拽、主题及退出检查全部通过。该消息测试不代替真实跨显示器 DPI 切换或驱动重置验收。
+启动、重开、私有提交、空闲 CPU 四项脚本目标均通过。GPU 内存计数器没有返回数据，不据此宣称显存占用为零。原始报告位于 `build/performance/` 本轮时间戳目录。
 
-实际数据副本对照使用 38 个书签和 27 张有效 PNG，两个版本均为独立新进程，系统文件缓存未清空。旧安装版本联网打开“工作”约 8.8 秒后才显示真实图标；旧模块重放中四张缓存排队约 12.47 秒。新版结果如下：
+### 边界与交付
 
-| 测量项 | 联网 | 离线 |
-| --- | ---: | ---: |
-| 首页命中的 25 张缓存，请求完成最大耗时 | 12.86 ms | 12.20 ms |
-| 新进程首次可操作绘制（从请求展开计时） | 90.99 ms | 88.82 ms |
-| 首帧真实图标 / 绘制图标 | 25 / 30 | 25 / 30 |
-| “工作”连续三次再次展开 | 14.92～15.35 ms | 12.96～20.34 ms |
-| “工作”重开首帧真实图标 / 绘制图标 | 4 / 4 | 4 / 4 |
+- 数据验证使用隔离目录，不将测试数据写入正式书签或正式偏好；未更新正式安装，未发布本轮版本。
+- 单机原生运行不等于所有设备验收。真实多显示器不同 DPI、不同中文 IME 候选操作、屏幕阅读器口述、系统登录启动及不同 Edge 安装布局仍需对应环境人工验收。
+- Windows 用 Ctrl 映射应用内 Command 组合；默认全局唤起保留 Ctrl+Alt+Space。平台字体与系统输入组件不同，不宣称跨平台逐像素相同。
+- 当前产品与构建说明见 [README.md](README.md)，实现范围见 [Windows 方案](../plans/PLAN_WINDOWS.md)。交付名称为 `Frog.exe`、`Frog-windows-x64.zip`，ZIP 根目录为 `Frog/`。
 
-剩余五张首页缩略图没有有效缓存。已有缓存的图标均在新进程首次可操作绘制时显示；“工作”重开使用原有绘制表面和位图，没有重复读盘。已查看首页、文件夹及重开截图；首帧结论来自成功绘制后记录的诊断计数，不以动画结束后的截图推断。
+### 安装包验证
 
-真实数据副本联网收起 30 秒后：私有提交 **33.53 MB（31.97 MiB）**，工作集 **62.54 MB**；D3DKMT 查询的已提交专用显存 **18.11 MiB**、共享显存 **2.82 MiB**，随后 10 秒平均 CPU **0%**（单核 100% 口径）。这些是整个进程的值，不是新增线程或图标的净增量，也不能将提交显存当作当前物理驻留显存。
+已生成 Release ZIP，并执行 `windows/scripts/verify-package.ps1`：ASCII 命名、ZIP 内 EXE 与 Release 哈希一致、隔离首次安装、更新、旧版中文 EXE 名称升级、未知目录保护、卸载与隔离数据保留全部通过。安装与卸载仅发生在 `build/verification/` 临时目录，未更换正式安装。报告为 `build/verification/package-report.json`。
 
-`measure-performance.ps1` 生成 1,000 个隔离书签：进程启动至可操作 **176.98 ms**，三次重开 **23.32 / 29.19 / 20.25 ms**，收起 30 秒私有提交 **33.92 MB**，10 秒平均 CPU **0%**。启动 ≤1,000 ms、重开 ≤150 ms、私有提交 ≤50 MB、平均 CPU ≤0.5% 四项目标均达到；该场景离线且未预置图标。常规 GPU 性能计数器不可用，显存数据取上面的真实数据副本 D3DKMT 采样。
+### 文件夹折角视觉修正
 
-环境：Windows 11 10.0.26100、i7-13700HX、32 GiB 内存、AMD Radeon HD 7670，1920×1080 / 100% 缩放。首次启动仍异步读取缓存，不保证其他机器每次冷启动零占位；真实高 DPI、多显示器及驱动失效后的行为和资源成本仍需跨设备验证。
+将字体字符 `⌄ / ›` 替换为 Direct2D 线条折角，两种状态共享行中心，笔画宽度为 1.5 个设计单位，不再受字体基线影响。默认 Release 可执行文件被占用，因此在 `build/arrow-review/` 独立构建，没有终止正在使用的程序或覆盖原安装包。
 
-本地证据（均为忽略的验收产物）：
+独立 Release 构建成功，已查看 `build/arrow-review/Testing/artifacts/tree-expanded.png`，确认展开折角居中。`core`、`terminal-features` 通过；原生运行的树形展开、焦点和拖放等检查通过，但后续文件操作阶段因“输入框内容与真实键盘输入不一致”失败，本轮不能标为完整回归通过。
 
-- `build/verification/icon-delay-20260915/fix-report.md`、`runs/ui-fixed-online/`、`runs/ui-fixed-offline/`：请求时间、首帧、截图与内存。
-- `build/Testing/artifacts/application.jsonl`：181 书签、位图上限与重建记录。
-- `build/performance/20260915-175337/report.json`：1,000 书签性能与硬件信息。
+### 透明托盘图标
 
-本次 Release 已重新构建并打包；正式书签、偏好、27 张缓存和已安装 EXE 的哈希与检查前一致，正式安装进程仍运行旧版本。本次交付尚未安装。
+独立 Release 已重新构建。使用 Windows `LoadLibraryEx` / `LoadImage` 从实际 EXE 加载托盘资源 102，16、24、32、48、64、128、256 七档均通过透明角落与不透明主体检查，并已查看 `build/arrow-review/tray-preview.png` 的完整青蛙轮廓。原资源 101 仍用于应用图标。本轮未替换正在运行的版本，未在 Explorer 托盘现场截图；透明效果验证来自实际 Windows 图标资源加载结果。

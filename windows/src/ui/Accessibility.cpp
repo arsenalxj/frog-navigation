@@ -35,9 +35,9 @@ public:
         auto boolean = [&](bool b) { value->vt = VT_BOOL; value->boolVal = b ? VARIANT_TRUE : VARIANT_FALSE; };
         switch (id) {
         case UIA_NamePropertyId: string(node ? node->name : L"青蛙导航书签启动台"); break;
-        case UIA_AutomationIdPropertyId: string(token_ ? L"Frog.Item." + std::to_wstring(token_) : L"Frog.Grid"); break;
+        case UIA_AutomationIdPropertyId: string(token_ ? L"Frog.Item." + std::to_wstring(token_) : L"Frog.Terminal"); break;
         case UIA_ControlTypePropertyId: value->vt = VT_I4; value->lVal = token_ ? UIA_ButtonControlTypeId : UIA_PaneControlTypeId; break;
-        case UIA_HelpTextPropertyId: string(node ? node->help : L"方向键选择，Enter 打开，F2 编辑，Delete 删除。"); break;
+        case UIA_HelpTextPropertyId: string(node ? node->help : L"方向键或 j/k 选择，Enter 打开，e 编辑，D 删除，冒号输入命令。"); break;
         case UIA_IsKeyboardFocusablePropertyId: case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: boolean(true); break;
         case UIA_IsEnabledPropertyId: boolean(!node || node->enabled); break;
         case UIA_HasKeyboardFocusPropertyId: boolean(state_->focus == token_); break;
@@ -118,41 +118,4 @@ private:
 };
 }
 IRawElementProviderSimple* createAccessibility(const std::shared_ptr<AccessibleState>& state) { return new Provider(state); }
-void Launcher::syncAccessibility() {
-    if (!window_) return;
-    std::vector<AccessibleNode> nodes; accessibleActions_.clear(); int focus = 0;
-    auto add = [&](const std::string& action, const std::wstring& name, Rect rect, bool selected, const std::wstring& help) {
-        if (!accessibleTokens_.contains(action)) accessibleTokens_[action] = nextToken_++;
-        int token = accessibleTokens_[action]; accessibleActions_[token] = action;
-        POINT origin{}; ClientToScreen(window_, &origin);
-        RECT bounds{origin.x + static_cast<LONG>(rect.x * dpiScale_), origin.y + static_cast<LONG>(rect.y * dpiScale_), origin.x + static_cast<LONG>((rect.x + rect.width) * dpiScale_), origin.y + static_cast<LONG>((rect.y + rect.height) * dpiScale_)};
-        nodes.push_back({token, name, help, bounds, selected, true, false}); if (selected) focus = token;
-    };
-    if (panel_ == Panel::none) {
-        for (size_t i = 0; i < visibleItems_.size(); ++i) {
-            auto& item = visibleItems_[i]; std::wstring help = item.folder ? L"文件夹，按 Enter 展开。" : L"书签，按 Enter 打开；F2 编辑；Delete 删除。";
-            if (auto b = snapshot_.document.bookmark(item.id)) { help += wide(b->url); if (b->groupId) if (auto g = snapshot_.document.group(*b->groupId)) help += L"，所属文件夹：" + wide(g->name); }
-            add(item.id, wide(item.title), view_.layout.tile(static_cast<int>(i), view_.inFolder()), view_.selection == static_cast<int>(i), help);
-        }
-        if (view_.pageCount(snapshot_.document) > 1) { add("__previous__", L"上一页", {20, view_.layout.height / 2 - 24, 32, 48}, false, L"Page Up"); add("__next__", L"下一页", {view_.layout.width - 52, view_.layout.height / 2 - 24, 32, 48}, false, L"Page Down"); }
-        if (view_.inFolder()) add("__back__", L"返回根目录", view_.layout.folderBounds(), false, L"Esc 返回");
-    }
-    bool changed = false, focusChanged = false;
-    { std::lock_guard lock(accessibility_->mutex);
-      focusChanged = accessibility_->focus != focus;
-      changed = accessibility_->nodes.size() != nodes.size();
-      if (!changed) for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i].token != accessibility_->nodes[i].token || nodes[i].name != accessibility_->nodes[i].name || !EqualRect(&nodes[i].bounds, &accessibility_->nodes[i].bounds)) { changed = true; break; }
-      accessibility_->window = window_; accessibility_->nodes = std::move(nodes); accessibility_->focus = focus; }
-    if (changed && provider_) UiaRaiseStructureChangedEvent(provider_.Get(), StructureChangeType_ChildrenInvalidated, nullptr, 0);
-    if (focusChanged && focus && provider_) { auto* item = static_cast<IRawElementProviderSimple*>(new Provider(accessibility_, focus)); UiaRaiseAutomationEvent(item, UIA_AutomationFocusChangedEventId); item->Release(); }
-}
-void Launcher::accessibleAction(int token, bool focusOnly) {
-    if (panel_ != Panel::none || !visible_) return;
-    auto it = accessibleActions_.find(token); if (it == accessibleActions_.end()) return; auto action = it->second;
-    if (action == "__previous__") turn(-1); else if (action == "__next__") turn(1); else if (action == "__back__") { view_.folder.reset(); updateLayout(); }
-    else {
-        for (size_t i = 0; i < visibleItems_.size(); ++i) if (visibleItems_[i].id == action) view_.selection = static_cast<int>(i);
-        SetFocus(window_); syncAccessibility(); if (!focusOnly) activate(action); else invalidate();
-    }
-}
 }

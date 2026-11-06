@@ -109,7 +109,7 @@
 
 书签图标固定采用本地生成的「标题首字符 + 传统色底板」（20×20，3px 圆角）：英文字母大写，中文保留首字，底色由书签 ID 稳定映射；修改标题后首字随之更新，底色不变。此方案用于最终界面，不下载、缓存网页图标，也不提供图标刷新命令。
 
-JSON 格式与持久化规则参考 `plans/PLAN_MACOSAPP.md`；本原型的命令交互与图标方案以本规格为准。macOS 原生应用已按本规格重构（AppKit 原生绘制 + `Sources/Frog/Assets` 静态 SVG），Windows 仍为 Launchpad 界面，不在本轮范围。
+JSON 格式与持久化规则参考 `plans/PLAN_MACOSAPP.md`；本原型的命令交互与图标方案以本规格为准。macOS 使用 AppKit 原生绘制与静态 SVG，Windows 使用 Win32 / Direct2D / DirectWrite 对齐同一终端布局与交互；Windows 不实现文件夹快跳。各平台实际验证边界见对应 `VALIDATION.md`。
 
 自 2026-11-05 起取消“进入文件夹”，交互以 `designs/frog-tree-expand` 的全映射原型为准；本目录的 JSX/Playwright 用例仍保留旧的进入流程与 atlas 命令地图，作为历史对照，不再代表当前产品交互。
 

@@ -5,7 +5,7 @@
 namespace frog {
 constexpr UINT wmDispatch = WM_APP + 1, wmActivate = WM_APP + 2, wmDirectory = WM_APP + 3, wmTray = WM_APP + 4, wmCorner = WM_APP + 5, wmAccessibleInvoke = WM_APP + 6;
 struct Options {
-    bool background = false, offline = false, isolated = false;
+    bool background = false, isolated = false;
     fs::path dataDirectory, diagnostics;
     static Options parse();
 };
@@ -13,10 +13,9 @@ struct HotKey { bool enabled = true; UINT modifiers = MOD_CONTROL | MOD_ALT, key
 struct Preferences {
     fs::path dataDirectory;
     HotKey hotkey;
-    bool cornersEnabled = false;
-    unsigned corners = 0;
-    int page = 0;
-    std::string appearance = "system";
+    bool cornersEnabled = true;
+    unsigned corners = 4;
+    std::vector<std::string> expandedGroupIDs;
     static Preferences load(const Options& options);
     void save(const Options& options) const;
 };
@@ -57,15 +56,9 @@ void setLoginStartup(bool enabled);
 bool loginStartupRegistered();
 bool loginStartupDisabled();
 fs::path startupLink();
-RECT monitorWorkArea(HMONITOR monitor);
 bool openUrl(const std::string& url);
 void copyText(HWND owner, const std::wstring& text);
 void accessibleName(HWND window, const wchar_t* name);
-std::optional<fs::path> chooseFile(HWND owner, bool save, bool folder = false);
-struct Theme {
-    bool dark = true, highContrast = false, reducedMotion = false;
-    void update(const Preferences& preferences);
-};
 class Diagnostics {
 public:
     explicit Diagnostics(const fs::path& path);

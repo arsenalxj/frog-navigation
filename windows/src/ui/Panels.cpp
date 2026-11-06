@@ -1,280 +1,499 @@
 #include "Launcher.h"
-#include <commctrl.h>
+#include "core/Calculator.h"
+#include "core/EdgeBookmarks.h"
 #include <shellapi.h>
-#include <uxtheme.h>
+#include <shlobj.h>
 #include <algorithm>
+#include <cctype>
 
 namespace frog {
 namespace {
-constexpr int inputUrl = 201, inputTitle = 202, inputLocation = 203, inputNewFolder = 204, inputRename = 211;
-constexpr int cancelButton = 220, saveButton = 221, closeButton = 230;
-D2D1_COLOR_F color(UINT32 rgb, float alpha = 1) { return D2D1::ColorF(rgb, alpha); }
+constexpr UINT32 ink = 0x3b3a3e, muted = 0x695e45, green = 0x0d5e3a, teal = 0x126e82, red = 0x7c1823;
+struct Command { const char* name; const char* summary; const char* usage; };
+constexpr Command commands[]{
+    {"add", "添加书签 · URL → title → location；新文件夹与书签一次保存", ":add"},
+    {"edit", "编辑书签 · Tab切字段；Enter一次保存标题与网址", ":edit [title|url]"},
+    {"rename", "重命名文件夹 · 非空、60字以内、不能重名", ":rename"},
+    {"mkdir", "创建文件夹 · 空参数进入提示流", ":mkdir [名称]"},
+    {"move", "移动书签 · 根目录 / 现有文件夹 / 新建文件夹", ":move"},
+    {"delete", "删除所选项 · y确认；N/Enter/Esc取消；只删空文件夹", ":delete"},
+    {"open", "打开书签或展开/折叠文件夹", ":open"},
+    {"copy", "复制所选书签完整网址", ":copy"},
+    {"find", "跨文件夹搜索标题和网址 · 无结果Enter网页搜索", ":find [关键词]"},
+    {"calc", "计算器 · 四则运算/括号；Enter计算；c复制", ":calc [clear]"},
+    {"group", "展开并定位文件夹；根目录折叠全部", ":group 名称"},
+    {"backup", "导出真实JSON快照；不包含本机偏好", ":backup [文件路径]"},
+    {"restore", "校验并整体替换全部书签与文件夹（不合并）", ":restore [文件路径]"},
+    {"import", "只读合并Edge；文件夹压平，同名组合并，网址去重", ":import edge [数据目录]"},
+    {"cd", "切换数据目录；空目录写入当前数据；旧目录保留", ":cd [目录路径]"},
+    {"set", "本机设置 · login / hotkey / corner / data", ":set [设置项] [值]"},
+    {"retry", "重新读取真实数据；读取失败保留已载入数据", ":retry"},
+    {"clear", "清空本次运行日志，不修改书签", ":clear"},
+    {"help", "命令帮助与键位", ":help"},
+    {"log", "本次运行真实日志，最多200条", ":log"},
+    {"q", "退出青蛙导航", ":q"}
+};
+std::pair<std::string, std::string> split(const std::string& raw) {
+    auto value = trim(raw); auto at = value.find_first_of(" \t\r\n");
+    return {lower(value.substr(0, at)), at == std::string::npos ? "" : trim(value.substr(at + 1))};
 }
-Rect Launcher::panelBounds() const {
-    float width = panel_ == Panel::settings ? 760.0f : 448.0f;
-    float height = panel_ == Panel::settings ? 540.0f : (panel_ == Panel::rename ? 265.0f : (draft_.location == "__new__" ? 494.0f : 416.0f));
-    width = std::min(width, view_.layout.width - 30); height = std::min(height, view_.layout.height - 30);
-    return {(view_.layout.width - width) / 2, (view_.layout.height - height) / 2, width, height};
+std::string checkedTitle(const std::string& value) { auto title = trim(value); require(!title.empty() && characters(title) <= 120, "标题不能为空，且不能超过120字。"); return title; }
+std::string checkedFolder(const std::string& value, const Document& data, const std::string& excluding = {}) {
+    auto name = trim(value); require(!name.empty() && characters(name) <= 60, "文件夹名称不能为空，且不能超过60字。");
+    for (const auto& group : data.groups) require(group.id == excluding || group.name != name, "已存在同名文件夹 “" + name + "”。");
+    return name;
 }
-HWND Launcher::control(const wchar_t* type, const std::wstring& value, DWORD style, int id) {
-    auto window = CreateWindowExW(_wcsicmp(type, L"EDIT") == 0 ? WS_EX_CLIENTEDGE : 0, type, value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | style, 0, 0, 1, 1, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
-    require(window != nullptr, "无法建立原生控件。"); SendMessageW(window, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-    SetWindowTheme(window, theme_.dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
-    SetWindowSubclass(window, controlProc, 1, reinterpret_cast<DWORD_PTR>(this)); controls_[id] = window; return window;
+std::string clockText() { SYSTEMTIME t{}; GetLocalTime(&t); char value[16]{}; sprintf_s(value, "%02u:%02u:%02u", t.wHour, t.wMinute, t.wSecond); return value; }
+std::string titleFromUrl(const std::string& url) { auto at = url.find("://"); at = at == std::string::npos ? 0 : at + 3; return url.substr(at, url.find_first_of("/?#", at) - at); }
+void commandHints(const std::string& value, std::vector<TerminalChoice>& out) {
+    out.clear(); if (value.find_first_of(" \t") != std::string::npos) return;
+    auto prefix = lower(value);
+    for (const auto& command : commands) if (std::string_view(command.name).starts_with(prefix)) { out.push_back({command.name, command.summary, command.usage}); if (out.size() == 3) break; }
 }
-void Launcher::moveControl(int id, Rect rect) {
-    auto it = controls_.find(id); if (it == controls_.end()) return;
-    MoveWindow(it->second, static_cast<int>(rect.x * dpiScale_), static_cast<int>(rect.y * dpiScale_), static_cast<int>(rect.width * dpiScale_), static_cast<int>(rect.height * dpiScale_), TRUE);
 }
-void Launcher::destroyPanelControls() { for (auto [id, window] : controls_) DestroyWindow(window); controls_.clear(); composing_ = false; }
-void Launcher::createPanelControls() {
-    destroyPanelControls(); if (panel_ == Panel::none) return;
-    EnableWindow(search_, FALSE); EnableWindow(settingsButton_, FALSE); EnableWindow(addButton_, FALSE);
-    ShowWindow(search_, SW_HIDE); ShowWindow(settingsButton_, SW_HIDE); ShowWindow(addButton_, SW_HIDE);
-    if (panel_ == Panel::bookmark) {
-        control(L"EDIT", wide(draft_.url), ES_AUTOHSCROLL, inputUrl); SendMessageW(controls_[inputUrl], EM_SETLIMITTEXT, 8192, 0);
-        control(L"EDIT", wide(draft_.title), ES_AUTOHSCROLL, inputTitle); SendMessageW(controls_[inputTitle], EM_SETLIMITTEXT, 2048, 0);
-        auto combo = control(L"COMBOBOX", L"位置", CBS_DROPDOWNLIST | WS_VSCROLL, inputLocation); locationChoices_.clear();
-        auto add = [&](const std::string& id, const std::string& name) { locationChoices_.push_back(id); SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(name).c_str())); };
-        add("", "根目录"); for (const auto& g : snapshot_.document.groups) add(g.id, g.name); add("__new__", "新建文件夹…");
-        int selected = 0; for (size_t i = 0; i < locationChoices_.size(); ++i) if (locationChoices_[i] == draft_.location) selected = static_cast<int>(i);
-        if (!draft_.location.empty() && draft_.location != "__new__" && !snapshot_.document.group(draft_.location)) { add(draft_.location, "原文件夹已不存在，请重新选择"); selected = static_cast<int>(locationChoices_.size()) - 1; }
-        SendMessageW(combo, CB_SETCURSEL, selected, 0);
-        control(L"EDIT", wide(draft_.newFolder), ES_AUTOHSCROLL, inputNewFolder);
-        SendMessageW(controls_[inputUrl], EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"example.com 或 https://example.com"));
-        SendMessageW(controls_[inputTitle], EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"书签名称（最多 120 个字符）"));
-        control(L"BUTTON", L"取消", BS_PUSHBUTTON, cancelButton); control(L"BUTTON", draft_.id.empty() ? L"添加" : L"保存", BS_DEFPUSHBUTTON, saveButton);
-    } else if (panel_ == Panel::rename) {
-        auto group = snapshot_.document.group(renameId_); control(L"EDIT", group ? wide(group->name) : L"", ES_AUTOHSCROLL, inputRename);
-        control(L"BUTTON", L"取消", BS_PUSHBUTTON, cancelButton); control(L"BUTTON", L"保存", BS_DEFPUSHBUTTON, saveButton);
-    } else {
-        const wchar_t* names[]{L"常规", L"快捷键", L"屏幕触角", L"数据与备份", L"关于"};
-        for (int i = 0; i < 5; ++i) control(L"BUTTON", names[i], BS_PUSHBUTTON, 300 + i);
-        control(L"BUTTON", L"关闭", BS_PUSHBUTTON, closeButton);
-        if (settingsTab_ == 0) {
-            auto appearance = control(L"COMBOBOX", L"外观", CBS_DROPDOWNLIST, 401);
-            for (auto name : {L"跟随系统", L"深色", L"浅色"}) SendMessageW(appearance, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-            SendMessageW(appearance, CB_SETCURSEL, preferences_.appearance == "dark" ? 1 : (preferences_.appearance == "light" ? 2 : 0), 0);
-            control(L"BUTTON", L"登录后静默启动青蛙导航", BS_AUTOCHECKBOX, 404);
-            SendMessageW(controls_[404], BM_SETCHECK, !options_.isolated && loginStartupRegistered() ? BST_CHECKED : BST_UNCHECKED, 0);
-            EnableWindow(controls_[404], !options_.isolated);
-            control(L"BUTTON", L"打开 Windows 启动应用设置", BS_PUSHBUTTON, 405);
-        } else if (settingsTab_ == 1) {
-            control(L"BUTTON", hotkeyCapture_ ? L"请按下新快捷键…" : hotkeyName(preferences_.hotkey), BS_PUSHBUTTON, 410);
-            control(L"BUTTON", L"恢复默认", BS_PUSHBUTTON, 411);
-            control(L"BUTTON", L"启用全局快捷键", BS_AUTOCHECKBOX, 412); SendMessageW(controls_[412], BM_SETCHECK, preferences_.hotkey.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-        } else if (settingsTab_ == 2) {
-            control(L"BUTTON", L"启用屏幕触角", BS_AUTOCHECKBOX, 420); SendMessageW(controls_[420], BM_SETCHECK, preferences_.cornersEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
-            const wchar_t* cornerNames[]{L"左上角", L"右上角", L"左下角", L"右下角"};
-            for (int i = 0; i < 4; ++i) { control(L"BUTTON", cornerNames[i], BS_AUTOCHECKBOX, 421 + i); SendMessageW(controls_[421 + i], BM_SETCHECK, preferences_.corners & (1u << i) ? BST_CHECKED : BST_UNCHECKED, 0); }
-        } else if (settingsTab_ == 3) {
-            control(L"EDIT", preferences_.dataDirectory.wstring(), ES_AUTOHSCROLL | ES_READONLY, 429);
-            control(L"BUTTON", L"打开所在文件夹", BS_PUSHBUTTON, 430); control(L"BUTTON", L"选择目录…", BS_PUSHBUTTON, 431);
-            control(L"BUTTON", L"导出 JSON…", BS_PUSHBUTTON, 432); control(L"BUTTON", L"恢复备份…", BS_PUSHBUTTON, 433); control(L"BUTTON", L"重试读取", BS_PUSHBUTTON, 434);
-        } else {
-            control(L"BUTTON", L"退出青蛙导航", BS_PUSHBUTTON, 440);
-            control(L"STATIC", L"青蛙导航图标", SS_ICON | SS_REALSIZECONTROL, 441);
+bool Launcher::textInputActive() const { return input_ == TerminalInput::command || input_ == TerminalInput::search || input_ == TerminalInput::calc || (input_ == TerminalInput::prompt && prompt_ && prompt_->acceptsText); }
+void Launcher::setInput(TerminalInput kind, const std::string& value) {
+    if (kind == TerminalInput::command && input_ != TerminalInput::command) { historyIndex_ = -1; historyDraft_.clear(); completionPrefix_.clear(); lastCompletion_.clear(); }
+    input_ = kind; inputText_ = value;
+    updateHover(-1, -1);
+    if (kind == TerminalInput::command) commandHints(value, commandHints_); else commandHints_.clear();
+    changingInput_ = true; if (search_ && windowText(search_) != wide(value)) SetWindowTextW(search_, wide(value).c_str()); changingInput_ = false;
+    auto length = static_cast<DWORD>(wide(value).size()); savedSelectionStart_ = savedSelectionEnd_ = length;
+    layoutInput();
+    if (visible_ && search_) { if (textInputActive()) { SetFocus(search_); SendMessageW(search_, EM_SETSEL, length, length); } else SetFocus(window_); }
+    syncAccessibility(); invalidate();
+}
+void Launcher::inputChanged() {
+    if (changingInput_ || composing_ || !textInputActive() || busy_) return;
+    auto raw = windowText(search_); auto value = utf8(raw);
+    if (input_ == TerminalInput::command) commandHints(value, commandHints_);
+    if (input_ == TerminalInput::calc) {
+        auto filtered = calculator::filtered(value);
+        if (filtered != value) {
+            DWORD start{}, end{}; SendMessageW(search_, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            auto mappedStart = wide(calculator::filtered(utf8(raw.substr(0, std::min<size_t>(start, raw.size()))))).size();
+            auto mappedEnd = wide(calculator::filtered(utf8(raw.substr(0, std::min<size_t>(end, raw.size()))))).size();
+            changingInput_ = true; SetWindowTextW(search_, wide(filtered).c_str()); SendMessageW(search_, EM_SETSEL, mappedStart, mappedEnd); changingInput_ = false;
         }
-    }
-    const std::map<int, const wchar_t*> labels{{201,L"网址"},{202,L"标题"},{203,L"位置"},{204,L"新文件夹名称"},{211,L"文件夹名称"},{401,L"外观"},{429,L"数据目录"}};
-    for (const auto& [id, name] : labels) if (controls_.contains(id)) accessibleName(controls_[id], name);
-    layoutPanelControls(); syncAccessibility(); invalidate();
-}
-void Launcher::layoutPanelControls() {
-    if (panel_ == Panel::none) return; auto r = panelBounds(); float x = r.x + 28, width = r.width - 56;
-    if (panel_ == Panel::bookmark) {
-        moveControl(inputUrl, {x, r.y + 105, width, 34}); moveControl(inputTitle, {x, r.y + 183, width, 34});
-        moveControl(inputLocation, {x, r.y + 261, width, 250});
-        moveControl(inputNewFolder, {x, r.y + 339, width, 34});
-        auto it = controls_.find(inputNewFolder); if (it != controls_.end()) ShowWindow(it->second, draft_.location == "__new__" ? SW_SHOW : SW_HIDE);
-    } else if (panel_ == Panel::rename) moveControl(inputRename, {x, r.y + 100, width, 34});
-    if (panel_ != Panel::settings) {
-        moveControl(cancelButton, {r.x + r.width - 224, r.y + r.height - 55, 88, 32}); moveControl(saveButton, {r.x + r.width - 124, r.y + r.height - 55, 96, 32}); return;
-    }
-    for (int i = 0; i < 5; ++i) moveControl(300 + i, {r.x + 18, r.y + 90 + 47.0f * i, 140, 36});
-    moveControl(closeButton, {r.x + r.width - 106, r.y + r.height - 49, 82, 30});
-    x = r.x + 200; width = r.width - 228;
-    if (settingsTab_ == 0) {
-        moveControl(401, {x + 160, r.y + 105, width - 160, 160}); moveControl(404, {x, r.y + 187, width, 32}); moveControl(405, {x, r.y + 277, width, 34});
-    } else if (settingsTab_ == 1) {
-        moveControl(412, {x, r.y + 104, width, 30}); moveControl(410, {x, r.y + 150, width - 122, 38}); moveControl(411, {x + width - 108, r.y + 150, 108, 38});
-    } else if (settingsTab_ == 2) {
-        moveControl(420, {x, r.y + 104, width, 30});
-        for (int i = 0; i < 4; ++i) moveControl(421 + i, {x + (i % 2) * width / 2, r.y + 165 + (i / 2) * 58.0f, width / 2 - 10, 38});
-    } else if (settingsTab_ == 3) {
-        moveControl(429, {x, r.y + 113, width, 34}); moveControl(430, {x, r.y + 165, (width - 12) / 2, 34}); moveControl(431, {x + (width + 12) / 2, r.y + 165, (width - 12) / 2, 34});
-        moveControl(432, {x + width - 150, r.y + 265, 150, 34}); moveControl(433, {x + width - 150, r.y + 319, 150, 34}); moveControl(434, {x, r.y + 384, 120, 32});
+        inputText_ = filtered; calcExpression_ = filtered; calcHistoryIndex_ = -1; calcError_.clear(); calcFeedback_.clear(); updateCalcPreview();
     } else {
-        moveControl(440, {x, r.y + 316, 154, 36});
-        moveControl(441, {x, r.y + 94, 68, 68});
-        auto icon = LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), IMAGE_ICON,
-                               static_cast<int>(68 * dpiScale_), static_cast<int>(68 * dpiScale_), LR_SHARED);
-        SendMessageW(controls_[441], STM_SETICON, reinterpret_cast<WPARAM>(icon), 0);
+        inputText_ = value;
+        if (input_ == TerminalInput::search) { query_ = value; selection_ = scroll_ = 0; rebuildItems("__reset__"); }
+        else if (input_ == TerminalInput::prompt) { prompt_->error.clear(); captureDraft(); refreshChoices(true); }
+        else { historyIndex_ = -1; lastCompletion_.clear(); completionPrefix_.clear(); }
     }
+    SendMessageW(search_, EM_GETSEL, reinterpret_cast<WPARAM>(&savedSelectionStart_), reinterpret_cast<LPARAM>(&savedSelectionEnd_));
+    syncAccessibility(); invalidate();
 }
-void Launcher::drawPanel() {
-    auto r = panelBounds(); auto ink = color(theme_.dark ? 0xf2f2f2 : 0x202020), secondary = color(theme_.dark ? 0xaaaaaf : 0x66666b);
-    if (theme_.highContrast) { auto c = GetSysColor(COLOR_WINDOWTEXT); ink = D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f); secondary = ink; }
-    rectangle({0, 0, view_.layout.width, view_.layout.height}, color(0x000000, theme_.highContrast ? 1 : .48f));
-    auto surface = color(theme_.dark ? 0x242426 : 0xf3f3f3); if (theme_.highContrast) { auto c = GetSysColor(COLOR_WINDOW); surface = D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f); }
-    rectangle(r, surface, 8); rectangle(r, theme_.highContrast ? ink : color(theme_.dark ? 0xffffff : 0x000000, .12f), 8, true);
-    if (panel_ == Panel::settings) {
-        text(L"青蛙导航设置", {r.x + 25, r.y + 25, 150, 34}, 20, ink, false, true);
-        rectangle({r.x + 176, r.y + 70, 1, r.height - 94}, color(theme_.dark ? 0xffffff : 0x000000, .09f));
-        rectangle({r.x + 11, r.y + 98 + settingsTab_ * 47.0f, 3, 20}, color(theme_.dark ? 0x4cc2ff : 0x0067c0), 1);
-        const wchar_t* names[]{L"常规", L"快捷键", L"屏幕触角", L"数据与备份", L"关于青蛙导航"};
-        float x = r.x + 200, width = r.width - 228;
-        text(names[settingsTab_], {x, r.y + 34, width, 36}, 24, ink, false, true);
-        auto line = [&](const wchar_t* value, float y) { text(value, {x, r.y + y, width, 26}, 13, secondary); };
-        if (settingsTab_ == 0) {
-            text(L"外观", {x, r.y + 105, 140, 34}, 14, ink);
-            line(options_.isolated ? L"隔离运行：登录启动设置不可修改。" : (loginStartupDisabled() ? L"Windows 已禁用此启动项，请在系统设置中开启。" : L"登录后驻留托盘，首次展开时创建界面。"), 231);
-            line(L"打开网站、切换应用或点击空白处时收起。", 350);
-            line(L"Alt + F4 收起；完全退出请使用托盘或关于页面。", 379);
-        } else if (settingsTab_ == 1) {
-            line(hotkeyCapture_ ? L"按下新的组合键，Esc 取消。" : L"点击组合键进行修改，冲突时保留原快捷键。", 209);
-            line(L"Ctrl + N  添加书签        Ctrl + ,  打开设置", 281);
-            line(L"Ctrl + F 或 /  搜索       Page Up / Down  翻页", 314);
-            line(L"方向键选择 · Enter 打开 · Esc 逐层退出", 347);
-        } else if (settingsTab_ == 2) {
-            line(L"将鼠标移入所选屏幕角落即可展开启动台。", 303);
-            line(L"离开后再次进入才会触发，拖动时暂停触发。", 337);
-        } else if (settingsTab_ == 3) {
-            line(L"书签数据目录", 82);
-            line(L"可使用坚果云等工具同步；图标与偏好保留在本机。", 219);
-            text(L"另存备份", {x, r.y + 265, 160, 34}, 14, ink); text(L"完整恢复", {x, r.y + 319, 160, 34}, 14, ink);
-            text(L"恢复会替换全部书签和文件夹。", {x + 136, r.y + 384, width - 136, 32}, 12, secondary);
-        } else {
-            text(L"青蛙导航  1.0.0", {x, r.y + 183, width, 36}, 22, ink, false, true);
-            line(L"Windows 11 x64 · 本地书签启动台", 230); line(L"书签备份与 macOS 客户端互通。", 263);
-        }
-    } else {
-        text(panel_ == Panel::rename ? L"重命名文件夹" : (draft_.id.empty() ? L"添加书签" : L"编辑书签"), {r.x + 28, r.y + 24, r.width - 56, 34}, 24, ink, false, true);
-        auto label = [&](const wchar_t* value, float y) { text(value, {r.x + 28, r.y + y, r.width - 56, 24}, 13, ink); };
-        if (panel_ == Panel::rename) label(L"文件夹名称", 71);
-        else { label(L"网址", 76); label(L"标题", 154); label(L"位置", 232); if (draft_.location == "__new__") label(L"新文件夹名称", 310); }
-    }
+void Launcher::startSearch() { if (busy_ || prompt_) return; buffer_ = TerminalBuffer::none; organizing_ = false; selection_ = scroll_ = 0; setInput(TerminalInput::search, query_); rebuildItems("__reset__"); }
+void Launcher::submitInput() {
+    if (busy_) return;
+    if (prompt_) { if (prompt_->acceptsText) submitPrompt(); else if (prompt_->command != "hotkey") finishPrompt(); return; }
+    if (input_ == TerminalInput::calc) { submitCalc(); return; }
+    if (input_ == TerminalInput::command) {
+        auto command = trim(inputText_); setInput(TerminalInput::none);
+        if (!command.empty()) { history_.push_back(command); if (history_.size() > 50) history_.erase(history_.begin()); runCommand(command); }
+        if (buffer_ == TerminalBuffer::calc && !prompt_ && input_ == TerminalInput::none) setInput(TerminalInput::calc, calcExpression_);
+    } else if (input_ == TerminalInput::search) { if (trim(query_).empty()) escape(); else activate(); }
 }
-void Launcher::readDraft() {
-    if (panel_ != Panel::bookmark || !controls_.contains(inputUrl)) return;
-    draft_.url = utf8(windowText(controls_[inputUrl])); draft_.title = utf8(windowText(controls_[inputTitle])); draft_.newFolder = utf8(windowText(controls_[inputNewFolder]));
-    auto index = SendMessageW(controls_[inputLocation], CB_GETCURSEL, 0, 0); if (index >= 0 && static_cast<size_t>(index) < locationChoices_.size()) draft_.location = locationChoices_[index];
-}
-void Launcher::edit(const std::string& id) {
-    if (panel_ != Panel::none) return;
-    cancelDrag(); draft_ = {}; draft_.expected = snapshot_.bytes; draft_.location = view_.inFolder() ? *view_.folder : "";
-    if (!id.empty()) { auto b = snapshot_.document.bookmark(id); if (!b) return; draft_.id = id; draft_.title = b->title; draft_.url = b->url; draft_.location = b->groupId.value_or(""); }
-    panel_ = Panel::bookmark; createPanelControls(); SetFocus(controls_[inputUrl]); SendMessageW(controls_[inputUrl], EM_SETSEL, 0, -1); animate();
-}
-void Launcher::rename(const std::string& id) {
-    if (panel_ != Panel::none || !snapshot_.document.group(id)) return;
-    cancelDrag(); renameId_ = id; renameExpected_ = snapshot_.bytes; panel_ = Panel::rename;
-    createPanelControls(); SetFocus(controls_[inputRename]); SendMessageW(controls_[inputRename], EM_SETSEL, 0, -1);
-}
-void Launcher::settings() {
-    if (panel_ != Panel::none) return; cancelDrag(); panel_ = Panel::settings; settingsTab_ = 0; createPanelControls(); SetFocus(controls_[300]); animate();
-}
-void Launcher::closePanel(bool discard) {
-    if (panel_ == Panel::bookmark && !discard) readDraft();
-    destroyPanelControls(); panel_ = Panel::none; hotkeyCapture_ = false;
-    EnableWindow(search_, TRUE); EnableWindow(settingsButton_, TRUE); EnableWindow(addButton_, TRUE); SetFocus(search_);
-    ShowWindow(search_, SW_SHOW); ShowWindow(settingsButton_, SW_SHOW); ShowWindow(addButton_, SW_SHOW); SetFocus(search_);
-    if (!statusPersistent_) status_.clear(); updateLayout(); animate();
-}
-void Launcher::saveDraft() {
-    if (panel_ != Panel::bookmark && panel_ != Panel::rename) return;
-    if (busy_) { notify("正在保存，请稍后。"); return; }
-    if (panel_ == Panel::rename) {
-        auto name = utf8(windowText(controls_.at(inputRename))), id = renameId_;
-        mutate([id, name](Document& data) { data.renameGroup(id, name); }, [this] { closePanel(); }, renameExpected_); return;
-    }
-    readDraft(); auto draft = draft_; Location location;
-    if (!draft.location.empty() && draft.location != "__new__") location = draft.location;
-    if (draft.location == "__new__") require(!trim(draft.newFolder).empty(), "请输入新文件夹名称。");
-    auto savedId = std::make_shared<std::string>();
-    mutate([=](Document& data) { *savedId = data.upsert(draft.id, draft.title, draft.url, location, draft.location == "__new__" ? draft.newFolder : ""); },
-        [this, savedId] { closePanel(); SetWindowTextW(search_, L""); view_.reveal(snapshot_.document, *savedId); updateLayout(); }, draft.expected);
-}
-void Launcher::refreshSettings() {
-    if (panel_ != Panel::settings) return;
-    createPanelControls(); if (settingsTab_ == 1) SetFocus(controls_[410]); else SetFocus(controls_[300 + settingsTab_]);
-}
-void Launcher::updatePreferences(Preferences next) {
-    auto old = preferences_;
-    try { hotkey_.set(controller_, next.hotkey); corners_.configure(controller_, next.cornersEnabled, next.corners); next.save(options_); }
-    catch (...) {
-        try { hotkey_.set(controller_, old.hotkey); corners_.configure(controller_, old.cornersEnabled, old.corners); } catch (const std::exception&) {}
-        throw;
-    }
-    preferences_ = std::move(next); updateTheme(); invalidate();
-}
-void Launcher::panelCommand(int id, int notification) {
-    if (id == inputLocation && notification == CBN_SELCHANGE) { readDraft(); layoutPanelControls(); invalidate(); return; }
-    if (id == cancelButton || id == closeButton) { if (!busy_) closePanel(); return; }
-    if (id == saveButton) { saveDraft(); return; }
-    if (id >= 300 && id <= 304) { hotkeyCapture_ = false; settingsTab_ = id - 300; status_.clear(); statusPersistent_ = false; refreshSettings(); return; }
-    if (panel_ != Panel::settings) return;
-    if (id == 401 && notification == CBN_SELCHANGE) {
-        int index = static_cast<int>(SendMessageW(controls_[401], CB_GETCURSEL, 0, 0)); auto prefs = preferences_; prefs.appearance = index == 1 ? "dark" : (index == 2 ? "light" : "system"); updatePreferences(prefs);
-    } else if (id == 404) {
-        require(!options_.isolated, "隔离运行不修改登录启动。");
-        try { setLoginStartup(SendMessageW(controls_[404], BM_GETCHECK, 0, 0) == BST_CHECKED); }
-        catch (...) { SendMessageW(controls_[404], BM_SETCHECK, loginStartupRegistered() ? BST_CHECKED : BST_UNCHECKED, 0); throw; }
-        refreshSettings(); notify(loginStartupRegistered() ? "已启用登录启动。" : "已关闭登录启动。");
-    } else if (id == 405) {
-        if (reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL)) <= 32) notify("无法打开 Windows 启动应用设置。", true);
-    } else if (id == 410) { hotkeyCapture_ = true; refreshSettings(); }
-    else if (id == 411 || id == 412) {
-        auto prefs = preferences_; if (id == 411) prefs.hotkey = {}; else prefs.hotkey.enabled = SendMessageW(controls_[412], BM_GETCHECK, 0, 0) == BST_CHECKED;
-        try { updatePreferences(prefs); } catch (...) { refreshSettings(); throw; } refreshSettings();
-    } else if (id >= 420 && id <= 424) {
-        auto prefs = preferences_; prefs.cornersEnabled = SendMessageW(controls_[420], BM_GETCHECK, 0, 0) == BST_CHECKED; prefs.corners = 0;
-        for (int i = 0; i < 4; ++i) if (SendMessageW(controls_[421 + i], BM_GETCHECK, 0, 0) == BST_CHECKED) prefs.corners |= 1u << i;
-        try { updatePreferences(prefs); } catch (...) { refreshSettings(); throw; }
-    } else if (id >= 430 && id <= 434) dataAction(id);
-    else if (id == 440) quit();
-}
-void Launcher::dataAction(int action) {
-    require(!busy_, "正在处理数据，请稍后重试。");
-    if (action == 430) {
-        auto result = ShellExecuteW(window_, L"open", preferences_.dataDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        require(reinterpret_cast<INT_PTR>(result) > 32, "数据目录不可用，无法在资源管理器中打开。"); return;
-    }
-    if (action == 434) { reload(); return; }
-    if (action != 431) require(loaded_, "请先成功读取书签，再导出或恢复备份。");
-    systemPanel_ = true; corners_.suppress(true);
-    std::optional<fs::path> selected;
-    try { selected = chooseFile(window_, action == 432, action == 431); } catch (...) { systemPanel_ = false; corners_.suppress(false); throw; }
-    systemPanel_ = false; corners_.suppress(false); if (!selected) return;
-    auto path = *selected, oldDirectory = preferences_.dataDirectory; auto document = snapshot_.document; auto expected = snapshot_.bytes;
-    busy_ = true;
-    storageQueue_->post([this, path, action, oldDirectory, document = std::move(document), expected] {
-        try {
-            if (action == 432) {
-                storage_.backup(path, document); dispatch([this] { busy_ = false; notify("备份已导出。"); });
-            } else if (action == 433) {
-                auto candidate = Document::decode(readFile(path));
-                dispatch([this, candidate = std::move(candidate), expected] {
-                    busy_ = false; systemPanel_ = true; corners_.suppress(true);
-                    auto prompt = L"此备份包含 " + std::to_wstring(candidate.bookmarks.size()) + L" 条书签和 " + std::to_wstring(candidate.groups.size()) + L" 个文件夹。\n\n恢复将整体替换当前数据，确认继续？";
-                    int answer = MessageBoxW(window_, prompt.c_str(), L"恢复备份", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2); systemPanel_ = false; corners_.suppress(false);
-                    if (answer == IDOK) mutate([candidate](Document& current) { current = candidate; }, [this] { view_.folder.reset(); view_.rootPage = 0; SetWindowTextW(search_, L""); updateLayout(); notify("备份已完整恢复。"); }, expected);
-                });
-            } else {
-                auto next = storage_.open(path, false, document);
-                dispatch([this, next = std::move(next), oldDirectory]() mutable {
-                    try {
-                        auto prefs = preferences_; prefs.dataDirectory = next.directory; prefs.save(options_); preferences_ = prefs;
-                        busy_ = false; view_.folder.reset(); view_.rootPage = 0; applySnapshot(std::move(next)); refreshSettings(); notify("已切换数据目录。");
-                    } catch (const std::exception& error) {
-                        storageQueue_->post([this, oldDirectory, message = std::string(error.what())] {
-                            try { auto restored = storage_.open(oldDirectory, false, {}, false); dispatch([this, restored = std::move(restored), message]() mutable { busy_ = false; applySnapshot(std::move(restored)); notify(message + " 已恢复原数据目录。", true); }); }
-                            catch (const std::exception& restoreError) { dispatch([this, message, detail = std::string(restoreError.what())] { busy_ = false; loaded_ = false; notify(message + " 原目录恢复失败：" + detail, true); }); }
-                        });
-                    }
-                });
+void Launcher::runCommand(const std::string& raw) {
+    if (busy_ || prompt_) return;
+    auto value = trim(raw); if (value.starts_with(':')) value.erase(0, 1); if (value.empty()) return;
+    auto [name, argument] = split(value); appendLog(":" + value, teal);
+    try {
+        if (name == "add" || name == "rename" || name == "move" || name == "delete") beginAction(name);
+        else if (name == "edit") { require(argument.empty() || argument == "title" || argument == "url", "用法：:edit [title|url]"); beginAction(name, argument == "url"); }
+        else if (name == "mkdir") { beginAction(name); if (!argument.empty()) { setInput(TerminalInput::prompt, argument); submitPrompt(); } }
+        else if (name == "open") { require(argument.empty(), "用法：:open；命令作用于当前选中项。"); buffer_ = TerminalBuffer::none; activate(); }
+        else if (name == "copy") copySelection();
+        else if (name == "find") { query_ = argument; startSearch(); }
+        else if (name == "group") {
+            require(!argument.empty(), "用法：:group 文件夹名称 / 根目录");
+            if (argument == "根目录" || argument == "root" || argument == "/") { buffer_ = TerminalBuffer::none; query_.clear(); scroll_ = 0; expanded_.clear(); persistExpanded(); rebuildItems(); appendLog("折叠全部文件夹"); }
+            else {
+                const Group* exact = nullptr; std::vector<const Group*> matches;
+                for (const auto& group : snapshot_.document.groups) { if (group.name == argument) exact = &group; if (group.name.starts_with(argument)) matches.push_back(&group); }
+                auto group = exact ? exact : matches.size() == 1 ? matches.front() : nullptr;
+                require(group != nullptr, matches.size() > 1 ? "多个文件夹匹配，请输入完整名称。" : "找不到文件夹 “" + argument + "”。");
+                buffer_ = TerminalBuffer::none; query_.clear(); scroll_ = 0;
+                auto id = group->id; expanded_.insert(id); persistExpanded(); rebuildItems(id); appendLog("已展开并定位文件夹 " + group->name);
             }
-        } catch (const std::exception& error) { dispatch([this, message = std::string(error.what())] { busy_ = false; notify(message + " 原数据保持不变。", true); }); }
+        } else if (name == "backup" || name == "restore" || name == "cd") { beginFilePrompt(name, argument); if (!argument.empty()) submitPrompt(); }
+        else if (name == "import") { auto [source, path] = split(argument); require(source == "edge", "用法：:import edge [数据目录]"); runEdgeImport(path.empty() ? edge::defaultDataRoot() : resolvedPath(path)); }
+        else if (name == "calc" || name == "calculator") {
+            if (argument.empty()) openCalc();
+            else if (lower(argument) == "clear") { calcExpression_.clear(); calcHistory_.clear(); calcHistoryIndex_ = -1; calcError_.clear(); calcPreview_.clear(); calcFeedback_.clear(); bufferOffset_ = 0; if (buffer_ == TerminalBuffer::calc) setInput(TerminalInput::calc); appendLog("计算器已清空", green); }
+            else throw Error("用法：:calc 打开计算器，:calc clear 清空。");
+        } else if (name == "set") runSetting(argument);
+        else if (name == "help") openBuffer(TerminalBuffer::help);
+        else if (name == "log") openBuffer(TerminalBuffer::log);
+        else if (name == "retry") { appendLog("重新读取真实数据文件…"); reload(); }
+        else if (name == "clear") { logs_.clear(); if (buffer_ == TerminalBuffer::log) bufferOffset_ = 0; refreshBuffer(); }
+        else if (name == "q") quit();
+        else throw Error("未知命令 “" + name + "” · 输入 :help 查看命令。");
+    } catch (const std::exception& e) { notify(e.what(), true); }
+    syncAccessibility(); invalidate();
+}
+void Launcher::completeCommand(bool backward) {
+    if (lastCompletion_ != inputText_) completionPrefix_ = inputText_;
+    std::vector<std::string> candidates;
+    if (completionPrefix_.starts_with("set ")) {
+        for (const auto* candidate : {"set login on", "set login off", "set login approve", "set hotkey on", "set hotkey off", "set hotkey reset", "set hotkey record", "set corner on", "set corner off", "set corner left-up", "set corner left-down", "set corner right-up", "set corner right-down", "set data "}) if (std::string_view(candidate).starts_with(completionPrefix_)) candidates.emplace_back(candidate);
+    } else for (const auto& command : commands) if (std::string_view(command.name).starts_with(completionPrefix_)) candidates.emplace_back(command.name);
+    if (candidates.empty()) return;
+    auto previous = std::find(candidates.begin(), candidates.end(), lastCompletion_); int count = static_cast<int>(candidates.size());
+    int next = previous == candidates.end() ? backward ? count - 1 : 0 : (static_cast<int>(previous - candidates.begin()) + (backward ? -1 : 1) + count) % count;
+    lastCompletion_ = candidates[next]; setInput(TerminalInput::command, lastCompletion_);
+}
+void Launcher::recallHistory(int delta) {
+    if (history_.empty()) return; if (historyIndex_ < 0) historyDraft_ = inputText_;
+    int next = std::clamp((historyIndex_ < 0 ? static_cast<int>(history_.size()) : historyIndex_) + delta, 0, static_cast<int>(history_.size()));
+    historyIndex_ = next == static_cast<int>(history_.size()) ? -1 : next; setInput(TerminalInput::command, historyIndex_ < 0 ? historyDraft_ : history_[historyIndex_]);
+}
+void Launcher::openBuffer(TerminalBuffer buffer) {
+    if (busy_ || prompt_) return; if (buffer == TerminalBuffer::calc) { openCalc(); return; }
+    cancelDrag(); buffer_ = buffer; bufferOffset_ = 0; refreshBuffer(); setInput(TerminalInput::none);
+}
+void Launcher::refreshBuffer() {
+    if (buffer_ != TerminalBuffer::settings && buffer_ != TerminalBuffer::help) return;
+    bufferLines_.clear();
+    auto add = [this](const std::string& value, UINT32 color = ink) { bufferLines_.push_back({{}, value, color}); };
+    if (buffer_ == TerminalBuffer::settings) {
+        add("# 本机偏好 · 不随书签同步，不进入备份", muted); add(""); add("[general] · 通用", green);
+        bool login = !options_.isolated && loginStartupRegistered(), disabled = !options_.isolated && loginStartupDisabled();
+        add(std::string("login\t") + (disabled ? "系统已禁用，需批准" : login ? "on" : "off") + "\t:set login on/off/approve");
+        if (options_.isolated) add("# 隔离运行：不允许修改系统登录项；本机偏好不写入正式配置。", muted);
+        if (auto error = settingErrors_.find("login"); error != settingErrors_.end()) add("# ! login: " + error->second, red);
+        add("hotkey\t" + (preferences_.hotkey.enabled ? utf8(hotkeyName(preferences_.hotkey)) : "off") + "\t:set hotkey record/reset/on/off");
+        if (!hotkeyError_.empty()) add("# ! " + hotkeyError_, red);
+        std::string corner = !preferences_.cornersEnabled ? "off" : preferences_.corners == 1 ? "左上" : preferences_.corners == 2 ? "右上" : preferences_.corners == 4 ? "左下" : preferences_.corners == 8 ? "右下" : "未选择角落";
+        add("corner\t" + corner + "\t:set corner left-up/left-down/right-up/right-down/on/off");
+        if (auto error = settingErrors_.find("corner"); error != settingErrors_.end()) add("# ! corner: " + error->second, red);
+        if (auto error = settingErrors_.find("preferences"); error != settingErrors_.end()) add("# ! preferences: " + error->second, red);
+        add(""); add("[data] · 书签数据", green);
+        add("file\t" + utf8((preferences_.dataDirectory / L"bookmarks.json").wstring()) + "\t:cd <目录>");
+        add("# 文件名固定为 bookmarks.json；:cd 切换存放目录，旧目录保留。", muted);
+        if (!issue_.empty()) add("# ! " + issue_, red);
+        add("bookmarks\t" + std::to_string(snapshot_.document.bookmarks.size()) + "\t"); add("groups\t" + std::to_string(snapshot_.document.groups.size()) + "\t");
+        add(""); add("[operations] · 数据操作", green);
+        add("导出书签与文件夹JSON副本；不改变当前数据目录。", ink); add("backup\t另存真实数据快照\t:backup [文件路径]");
+        add("restore\t整体替换全部书签与文件夹（不合并）\t:restore [文件路径]");
+        add("import\t只读合并Edge收藏；跳过重复网址\t:import edge [数据目录]");
+        add("retry\t重新读取数据文件\t:retry"); add("log\t" + std::to_string(logs_.size()) + " lines\t:log / :clear");
+    } else {
+        helpCommands_.clear();
+        for (const auto& command : commands) helpCommands_.push_back({command.name, command.summary, command.usage});
+    }
+    syncAccessibility(); invalidate();
+}
+void Launcher::beginPrompt(const std::string& command, const std::string& field, const std::string& value, int step, int total, bool acceptsText) {
+    TerminalPrompt prompt; prompt.command = command; prompt.field = field; prompt.step = step; prompt.total = total; prompt.acceptsText = acceptsText;
+    if (command == "edit") prompt.hint = "Tab/Shift+Tab 切换字段 · Enter 保存全部 · Esc 取消";
+    else if (command == "delete") prompt.hint = "删除 “" + draft_.title + "”？ y 删除 · N/Enter/Esc 取消";
+    else if (command == "hotkey") prompt.hint = "按下新的组合键 · Esc 取消";
+    else if (field == "location" || field == "to") prompt.hint = "Tab/上下选择 · Shift+Tab 返回 · Enter 选择 · Esc 取消";
+    else if (command == "restore") prompt.hint = "Enter 恢复并替换全部书签与文件夹 · Tab 补全 · Esc 取消";
+    else if (field == "path" || field == "file") prompt.hint = "Enter 提交 · Tab/上下补全真实路径 · Esc 取消";
+    else if (command == "add" || command == "move") prompt.hint = "Enter 下一步/保存 · Shift+Tab 返回 · Esc 取消";
+    else prompt.hint = "Enter 提交 · Esc 取消";
+    prompt_ = std::move(prompt); setInput(TerminalInput::prompt, value); refreshChoices(false);
+}
+void Launcher::beginAction(const std::string& command, bool urlFirst) {
+    if (busy_ || prompt_) return;
+    const auto* row = selectedRow(); draft_ = {}; draft_.expected = snapshot_.bytes;
+    if (command == "add") { buffer_ = TerminalBuffer::none; beginPrompt(command, "url", "", 0, 3); return; }
+    if (command == "mkdir") { beginPrompt(command, "name", ""); return; }
+    require(row != nullptr, "请选择书签或文件夹。"); draft_.id = row->id; draft_.isFolder = row->folder; draft_.title = row->title;
+    if (command == "rename") { require(row->folder, "请选择文件夹。"); draft_.folder = row->title; beginPrompt(command, "name", draft_.folder); return; }
+    if (command == "delete") {
+        require(!row->folder || snapshot_.document.items(row->id).empty(), "请先移出或删除文件夹内的书签，再删除文件夹。");
+        beginPrompt(command, "confirm", "", 0, 0, false); return;
+    }
+    require(!row->folder, "请选择书签。"); auto bookmark = snapshot_.document.bookmark(row->id); require(bookmark != nullptr, "书签已不存在。");
+    draft_.url = bookmark->url; draft_.title = bookmark->title; draft_.titleInitialized = true; draft_.location = bookmark->groupId.value_or("__root__");
+    if (command == "edit") beginPrompt(command, urlFirst ? "url" : "title", urlFirst ? draft_.url : draft_.title, urlFirst ? 1 : 0, 2);
+    else if (command == "move") { draft_.location.clear(); beginPrompt(command, "to", ""); showLocation(); }
+}
+void Launcher::finishPrompt() {
+    bool recording = prompt_ && prompt_->command == "hotkey"; ++choiceGeneration_; prompt_.reset(); draft_ = {};
+    if (recording) try { hotkey_.set(controller_, preferences_.hotkey); hotkeyError_.clear(); } catch (const std::exception& error) { hotkeyError_ = error.what(); appendLog(hotkeyError_, red); }
+    setInput(buffer_ == TerminalBuffer::calc ? TerminalInput::calc : TerminalInput::none, buffer_ == TerminalBuffer::calc ? calcExpression_ : ""); refreshBuffer();
+}
+void Launcher::captureDraft() {
+    if (!prompt_) return;
+    if (prompt_->field == "title") { draft_.title = inputText_; draft_.titleInitialized = true; } else if (prompt_->field == "url") draft_.url = inputText_;
+    else if (prompt_->field == "name" || prompt_->field == "folder") draft_.folder = inputText_;
+    else if (prompt_->field == "path" || prompt_->field == "file") draft_.path = inputText_;
+}
+void Launcher::switchEditField() { if (!prompt_ || prompt_->command != "edit" || busy_) return; captureDraft(); bool url = prompt_->field == "title"; beginPrompt("edit", url ? "url" : "title", url ? draft_.url : draft_.title, url ? 1 : 0, 2); }
+void Launcher::previousPrompt() {
+    if (!prompt_ || busy_) return; captureDraft(); auto command = prompt_->command; int step = prompt_->step;
+    if (command == "add") { if (step == 1) beginPrompt(command, "url", draft_.url, 0, 3); else if (step == 2) beginPrompt(command, "title", draft_.title, 1, 3); else if (step == 3) showLocation(); }
+    else if (command == "move" && step == 1) showLocation();
+    else if (prompt_->field == "path" || prompt_->field == "file") cycleChoice(-1);
+}
+void Launcher::showLocation() {
+    if (!prompt_) return; auto command = prompt_->command;
+    beginPrompt(command, command == "add" ? "location" : "to", "", command == "add" ? 2 : 0, command == "add" ? 3 : 0);
+    if (!prompt_->choices.empty()) chooseOption(prompt_->selected);
+}
+void Launcher::refreshChoices(bool filter) {
+    if (!prompt_) return;
+    if (prompt_->field == "location" || prompt_->field == "to") {
+        std::vector<TerminalChoice> choices{{"__root__", "根目录", ""}}; std::vector<const Group*> groups;
+        for (const auto& group : snapshot_.document.groups) groups.push_back(&group);
+        std::sort(groups.begin(), groups.end(), [](auto a, auto b) { return a->order == b->order ? a->id < b->id : a->order < b->order; });
+        for (auto group : groups) choices.push_back({group->id, group->name, std::to_string(snapshot_.document.items(group->id).size()) + " bookmarks"});
+        choices.push_back({"__new__", "新建文件夹…", "先命名，再原子保存"});
+        if (prompt_->command == "move") if (auto bookmark = snapshot_.document.bookmark(draft_.id)) std::erase_if(choices, [&](const auto& choice) { return choice.id == bookmark->groupId.value_or("__root__"); });
+        auto needle = lower(trim(inputText_));
+        if (filter && !needle.empty()) std::erase_if(choices, [&](const auto& choice) { return lower(choice.label).find(needle) == std::string::npos; });
+        prompt_->choices = std::move(choices); prompt_->selected = 0;
+        for (size_t i = 0; i < prompt_->choices.size(); ++i) if (prompt_->choices[i].id == draft_.location) prompt_->selected = static_cast<int>(i);
+        syncAccessibility(); invalidate();
+    } else if (prompt_->field == "path" || prompt_->field == "file") {
+        auto generation = ++choiceGeneration_; auto raw = inputText_; auto command = prompt_->command; fs::path full;
+        try { full = resolvedPath(raw.empty() ? "." : raw); } catch (const std::exception&) { prompt_->choices.clear(); return; }
+        bool trailing = raw.empty() || raw.back() == '/' || raw.back() == '\\'; auto parent = trailing ? full : full.parent_path(); auto prefix = trailing ? "" : lower(utf8(full.filename().wstring()));
+        prompt_->choices.clear(); prompt_->selected = 0;
+        storageQueue_->post([this, generation, raw, command, parent, prefix] {
+            std::vector<TerminalChoice> choices; std::error_code ec;
+            for (fs::directory_iterator it(parent, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
+                auto path = it->path(); auto name = utf8(path.filename().wstring()); if (!prefix.empty() && lower(name).find(prefix) == std::string::npos) continue;
+                bool directory = it->is_directory(ec); if (ec) break;
+                if (!directory && (command == "cd" || !it->is_regular_file(ec) || lower(utf8(path.extension().wstring())) != ".json")) continue;
+                auto value = utf8(path.wstring()) + (directory ? "\\" : ""); choices.push_back({value, value, directory ? "directory" : "JSON"});
+            }
+            std::sort(choices.begin(), choices.end(), [](const auto& a, const auto& b) { return a.detail != b.detail ? a.detail == "directory" : lower(a.label) < lower(b.label); });
+            dispatch([this, generation, raw, choices = std::move(choices)]() mutable { if (generation != choiceGeneration_ || !prompt_ || inputText_ != raw) return; prompt_->choices = std::move(choices); prompt_->selected = 0; syncAccessibility(); invalidate(); });
+        });
+    }
+}
+void Launcher::chooseOption(int index) {
+    if (!prompt_ || busy_ || index < 0 || index >= static_cast<int>(prompt_->choices.size())) return;
+    auto choice = prompt_->choices[index]; prompt_->selected = index; prompt_->error.clear();
+    if (prompt_->field == "location" || prompt_->field == "to") draft_.location = choice.id;
+    setInput(TerminalInput::prompt, choice.label); captureDraft();
+    if ((prompt_->field == "path" || prompt_->field == "file") && choice.detail == "directory") refreshChoices(false);
+}
+void Launcher::cycleChoice(int delta) {
+    if (!prompt_ || prompt_->choices.empty()) return; int count = static_cast<int>(prompt_->choices.size());
+    bool filled = prompt_->selected >= 0 && prompt_->selected < count && prompt_->choices[prompt_->selected].label == inputText_;
+    chooseOption(filled ? (prompt_->selected + delta + count) % count : delta < 0 ? count - 1 : prompt_->selected);
+}
+void Launcher::submitPrompt() {
+    if (!prompt_ || busy_) return; captureDraft(); auto command = prompt_->command;
+    try {
+        if (command == "add") {
+            if (prompt_->step == 0) { draft_.url = normalizeUrl(draft_.url); if (!draft_.titleInitialized) { draft_.title = titleFromUrl(draft_.url); draft_.titleInitialized = true; } beginPrompt(command, "title", draft_.title, 1, 3); }
+            else if (prompt_->step == 1) { draft_.title = checkedTitle(draft_.title); showLocation(); }
+            else if (prompt_->step == 2) {
+                require(!prompt_->choices.empty(), "请选择一个有效位置。"); draft_.location = prompt_->choices[prompt_->selected].id;
+                if (draft_.location == "__new__") beginPrompt(command, "folder", draft_.folder, 3, 4); else saveBookmark();
+            } else { checkedFolder(draft_.folder, snapshot_.document); saveBookmark(); }
+        } else if (command == "edit") {
+            try { draft_.title = checkedTitle(draft_.title); }
+            catch (const std::exception& e) { if (prompt_->field != "title") beginPrompt(command, "title", draft_.title, 0, 2); throw Error(e.what()); }
+            try { draft_.url = normalizeUrl(draft_.url); }
+            catch (const std::exception& e) { if (prompt_->field != "url") beginPrompt(command, "url", draft_.url, 1, 2); throw Error(e.what()); }
+            saveBookmark();
+        } else if (command == "rename" || command == "mkdir") {
+            auto name = checkedFolder(draft_.folder, snapshot_.document, draft_.id); auto id = std::make_shared<std::string>(draft_.id);
+            mutate([name, id, command](Document& data) { checkedFolder(name, data, *id); if (command == "rename") { require(data.group(*id) != nullptr, "文件夹已被外部删除；草稿已保留。"); data.renameGroup(*id, name); } else *id = data.addGroup(name); },
+                [this, id, name] { finishPrompt(); rebuildItems(*id); appendLog("已保存文件夹 “" + name + "”", green); }, draft_.expected);
+        } else if (command == "move") {
+            if (prompt_->step == 0) { require(!prompt_->choices.empty(), "请选择一个有效目标。"); draft_.location = prompt_->choices[prompt_->selected].id; if (draft_.location == "__new__") { beginPrompt(command, "name", draft_.folder, 1, 2); return; } }
+            else checkedFolder(draft_.folder, snapshot_.document);
+            auto draft = draft_; auto destination = std::make_shared<Location>();
+            mutate([draft, destination](Document& data) { require(data.bookmark(draft.id) != nullptr, "书签已被外部删除；草稿已保留。"); if (draft.location == "__new__") *destination = data.addGroup(checkedFolder(draft.folder, data)); else if (draft.location != "__root__") *destination = draft.location; data.move(draft.id, *destination); },
+                [this, id = draft.id, destination] { if (*destination) expanded_.insert(**destination); persistExpanded(); finishPrompt(); rebuildItems(id); appendLog("已移动书签", green); }, draft.expected);
+        } else if (command == "backup" || command == "restore" || command == "cd") runFileOperation(command, resolvedPath(draft_.path));
+    } catch (const std::exception& e) { notify(e.what(), true); }
+    syncAccessibility(); invalidate();
+}
+void Launcher::saveBookmark() {
+    auto draft = draft_; auto id = std::make_shared<std::string>(); auto destination = std::make_shared<Location>();
+    mutate([draft, id, destination](Document& data) {
+        if (!draft.id.empty()) { auto bookmark = data.bookmark(draft.id); require(bookmark != nullptr, "该书签已被外部删除；未提交输入仍保留。"); *destination = bookmark->groupId; }
+        else if (draft.location != "__root__" && draft.location != "__new__") *destination = draft.location;
+        auto newFolder = draft.location == "__new__" ? checkedFolder(draft.folder, data) : "";
+        *id = data.upsert(draft.id, checkedTitle(draft.title), normalizeUrl(draft.url), *destination, newFolder);
+        if (auto bookmark = data.bookmark(*id)) *destination = bookmark->groupId;
+    }, [this, id, destination, title = draft.title] { if (*destination) expanded_.insert(**destination); persistExpanded(); finishPrompt(); rebuildItems(*id); appendLog("已保存 “" + title + "”", green); }, draft.expected);
+}
+void Launcher::confirmDelete() {
+    if (!prompt_ || prompt_->command != "delete" || busy_) return; auto id = draft_.id; auto title = draft_.title; bool folder = draft_.isFolder;
+    mutate([id, folder](Document& data) { require(folder ? data.group(id) != nullptr : data.bookmark(id) != nullptr, "条目已被外部删除。"); require(!folder || data.items(id).empty(), "文件夹已包含书签，不能删除。"); data.remove(id); },
+        [this, id, title] { expanded_.erase(id); persistExpanded(); finishPrompt(); rebuildItems(); appendLog("已删除 “" + title + "”", green); }, draft_.expected);
+}
+fs::path Launcher::resolvedPath(const std::string& raw) const {
+    auto value = trim(raw); if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"') && value.back() == value.front()) value = value.substr(1, value.size() - 2);
+    require(!value.empty(), "路径不能为空。");
+    if (value == "~" || value.starts_with("~/") || value.starts_with("~\\")) { wchar_t home[32768]{}; DWORD count = GetEnvironmentVariableW(L"USERPROFILE", home, static_cast<DWORD>(std::size(home))); require(count > 0 && count < std::size(home), "无法读取用户主目录。"); value = utf8(std::wstring(home)) + value.substr(1); }
+    fs::path path(wide(value)); if (path.is_relative()) path = preferences_.dataDirectory / path; return fs::absolute(path).lexically_normal();
+}
+void Launcher::beginFilePrompt(const std::string& command, const std::string& argument) {
+    if (busy_ || prompt_) return; draft_ = {}; draft_.expected = snapshot_.bytes;
+    auto value = argument;
+    if (value.empty()) {
+        if (command == "backup") {
+            SYSTEMTIME t{}; GetLocalTime(&t); wchar_t filename[100]{}; swprintf_s(filename, L"青蛙导航-Bookmarks-%04u%02u%02u-%02u%02u%02u.json", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+            PWSTR documents{}; check(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documents), "无法读取文稿目录。");
+            ScopeExit freePath{[&] { CoTaskMemFree(documents); }}; value = utf8((fs::path(documents) / filename).wstring());
+        } else value = utf8(preferences_.dataDirectory.wstring()) + "\\";
+    }
+    draft_.path = value; beginPrompt(command, command == "restore" ? "file" : "path", value);
+}
+void Launcher::runFileOperation(const std::string& command, const fs::path& path) {
+    require(!busy_, "正在处理数据。"); require(loaded_ || command == "cd", "当前数据未能读取；请先 :retry 或 :cd。");
+    busy_ = true; buffer_ = TerminalBuffer::job; bufferOffset_ = 0; jobTitle_ = command; jobStatus_ = "RUNNING";
+    jobLines_ = {{clockText(), ":" + command + " " + utf8(path.wstring()), teal}, {clockText(), command == "backup" ? "校验并导出当前真实数据…" : "读取并校验真实数据文件…", ink}};
+    auto document = snapshot_.document; auto expected = draft_.expected.empty() ? snapshot_.bytes : draft_.expected; auto oldDirectory = preferences_.dataDirectory;
+    auto prefs = preferences_; auto options = options_; layoutInput(); syncAccessibility(); invalidate();
+    storageQueue_->post([this, command, path, document = std::move(document), expected, oldDirectory, prefs, options]() mutable {
+        try {
+            std::optional<Snapshot> result;
+            if (command == "backup") storage_.backup(path, document);
+            else if (command == "restore") result = storage_.restore(path, expected);
+            else {
+                // Preference failure must not leave Storage pointing at a different directory.
+                result = storage_.open(path, false, document);
+                try { prefs.dataDirectory = result->directory; prefs.save(options); }
+                catch (const std::exception& error) {
+                    std::string message = error.what();
+                    try { storage_.open(oldDirectory, false, {}, false); }
+                    catch (const std::exception& restoreError) { message += "；原目录恢复失败："; message += restoreError.what(); dispatch([this] { loaded_ = false; }); }
+                    throw Error(message);
+                }
+            }
+            dispatch([this, command, path, result = std::move(result), prefs]() mutable {
+                busy_ = false; issue_.clear(); if (command == "cd") preferences_ = prefs;
+                if (result) { query_.clear(); selection_ = scroll_ = 0; organizing_ = false; applySnapshot(std::move(*result)); }
+                auto message = command == "backup" ? "备份已保存至 " + utf8(path.wstring()) : command == "restore" ? "已整体恢复 " + std::to_string(snapshot_.document.bookmarks.size()) + " 条书签与 " + std::to_string(snapshot_.document.groups.size()) + " 个文件夹；数据目录未改变。" : "数据目录：" + utf8(snapshot_.directory.wstring()) + "；旧目录数据保留。";
+                finishPrompt(); jobStatus_ = "DONE"; jobLines_.push_back({clockText(), message, green}); jobLines_.push_back({clockText(), "exit 0", muted}); appendLog(message, green); diagnostics_.event("saved"); syncAccessibility(); invalidate();
+                if (reloadPending_) { reloadPending_ = false; reload(); }
+            });
+        } catch (const Conflict& e) {
+            std::optional<Snapshot> current; try { current = storage_.reload(); } catch (const std::exception&) {}
+            dispatch([this, current = std::move(current), message = std::string(e.what())]() mutable { busy_ = false; if (current) applySnapshot(std::move(*current)); draft_.expected = snapshot_.bytes; jobStatus_ = "ERROR"; jobLines_.push_back({clockText(), message, red}); jobLines_.push_back({clockText(), "exit 1", red}); notify(message + " 草稿已保留，核对后Enter重试。", true); diagnostics_.event("save_conflict"); });
+        } catch (const std::exception& e) { dispatch([this, message = std::string(e.what())] { busy_ = false; jobStatus_ = "ERROR"; jobLines_.push_back({clockText(), message, red}); jobLines_.push_back({clockText(), "exit 1", red}); notify(message + " 当前数据与输入已保留。", true); diagnostics_.event("save_failed", {{"message", message}}); }); }
     });
+}
+void Launcher::runEdgeImport(const fs::path& path) {
+    require(loaded_, "当前数据尚未成功读取。"); require(!busy_, "正在处理数据。"); busy_ = true; buffer_ = TerminalBuffer::job; bufferOffset_ = 0; jobTitle_ = "import edge"; jobStatus_ = "RUNNING";
+    jobLines_ = {{clockText(), ":import edge " + utf8(path.wstring()), teal}, {clockText(), "只读扫描Edge收藏；所有配置校验通过后一次保存…", ink}};
+    auto document = snapshot_.document; auto expected = snapshot_.bytes; layoutInput(); syncAccessibility(); invalidate();
+    storageQueue_->post([this, path, document = std::move(document), expected] {
+        try {
+            auto imported = edge::importFrom(document, path); auto saved = storage_.save(imported.document, expected);
+            dispatch([this, saved = std::move(saved), summary = imported.summary]() mutable {
+                busy_ = false; query_.clear(); selection_ = scroll_ = 0; organizing_ = false; applySnapshot(std::move(saved)); jobStatus_ = "DONE";
+                auto message = "已扫描 " + std::to_string(summary.profiles) + " 个Edge配置，导入 " + std::to_string(summary.inserted) + " 条书签，新建 " + std::to_string(summary.groups) + " 个文件夹；跳过重复 " + std::to_string(summary.duplicates) + " 条、不支持 " + std::to_string(summary.unsupported) + " 条。";
+                jobLines_.push_back({clockText(), message, green}); jobLines_.push_back({clockText(), "exit 0", muted}); appendLog(message, green); layoutInput(); syncAccessibility(); diagnostics_.event("saved"); if (reloadPending_) { reloadPending_ = false; reload(); }
+            });
+        } catch (const Conflict& e) {
+            std::optional<Snapshot> current; try { current = storage_.reload(); } catch (const std::exception&) {}
+            dispatch([this, current = std::move(current), message = std::string(e.what())]() mutable { busy_ = false; if (current) applySnapshot(std::move(*current)); jobStatus_ = "ERROR"; jobLines_.push_back({clockText(), message, red}); notify(message + " 请重新执行导入；Edge源文件未改动。", true); diagnostics_.event("save_conflict"); });
+        } catch (const std::exception& e) { dispatch([this, message = std::string(e.what())] { busy_ = false; jobStatus_ = "ERROR"; jobLines_.push_back({clockText(), message, red}); jobLines_.push_back({clockText(), "exit 1", red}); notify(message + " 原数据保持不变。", true); layoutInput(); diagnostics_.event("save_failed", {{"message", message}}); }); }
+    });
+}
+void Launcher::updatePreferences(const Preferences& next) {
+    auto old = preferences_; std::string stage;
+    bool hotkeyChanged = next.hotkey != old.hotkey;
+    bool cornerChanged = next.cornersEnabled != old.cornersEnabled || next.corners != old.corners;
+    try {
+        if (hotkeyChanged || !hotkeyError_.empty()) { stage = "hotkey"; hotkey_.set(controller_, next.hotkey); hotkeyError_.clear(); }
+        if (cornerChanged) { stage = "corner"; corners_.configure(controller_, next.cornersEnabled, next.corners); }
+        stage = "preferences"; next.save(options_); preferences_ = next; settingErrors_.erase(stage);
+    } catch (const std::exception& e) {
+        auto message = std::string(e.what());
+        try { if (hotkeyChanged) hotkey_.set(controller_, prompt_ && prompt_->command == "hotkey" ? HotKey{false} : old.hotkey); if (cornerChanged) corners_.configure(controller_, old.cornersEnabled, old.corners); }
+        catch (const std::exception& rollback) { message += "；恢复原设置失败："; message += rollback.what(); }
+        if (stage == "hotkey") hotkeyError_ = message; else settingErrors_[stage] = message;
+        refreshBuffer(); throw Error(message);
+    }
+    refreshBuffer(); invalidate();
+}
+void Launcher::runSetting(const std::string& argument) {
+    if (argument.empty()) { openBuffer(TerminalBuffer::settings); return; }
+    auto [key, original] = split(argument); auto value = lower(original); auto prefs = preferences_;
+    if (key == "data") { beginFilePrompt("cd", original); if (!original.empty()) submitPrompt(); return; }
+    settingErrors_.erase(key);
+    try {
+    if (key == "login") {
+        require(!options_.isolated, "隔离运行：不允许修改系统登录启动或打开正式登录项设置。");
+        if (value == "on" || value == "off") { setLoginStartup(value == "on"); appendLog(std::string("登录启动：") + (loginStartupRegistered() ? loginStartupDisabled() ? "已注册，等待系统批准" : "on" : "off")); }
+        else if (value == "approve") { require(reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL)) > 32, "无法打开Windows启动应用设置。"); appendLog("已打开系统启动应用设置；请在系统中批准后返回。"); }
+        else throw Error("用法：:set login on/off/approve");
+    } else if (key == "hotkey") {
+        if (value == "record") { hotkey_.set(controller_, HotKey{false}); draft_ = {}; beginPrompt("hotkey", "press keys", "", 0, 0, false); return; }
+        if (value == "on" || value == "off") prefs.hotkey.enabled = value == "on";
+        else if (value == "reset") prefs.hotkey = HotKey{};
+        else throw Error("用法：:set hotkey on/off/reset/record");
+        updatePreferences(prefs); appendLog("全局快捷键：" + (prefs.hotkey.enabled ? utf8(hotkeyName(prefs.hotkey)) : "off"));
+    } else if (key == "corner") {
+        if (value == "on" || value == "off") { prefs.cornersEnabled = value == "on"; if (prefs.cornersEnabled && !prefs.corners) prefs.corners = 4; }
+        else { unsigned mask = value == "left-up" ? 1 : value == "right-up" ? 2 : value == "left-down" ? 4 : value == "right-down" ? 8 : 0; require(mask != 0, "用法：:set corner on/off/left-up/left-down/right-up/right-down"); prefs.corners = mask; prefs.cornersEnabled = true; }
+        updatePreferences(prefs); cornerFlashUntil_ = milliseconds() + 900; SetTimer(window_, 8, 900, nullptr); appendLog("屏幕触角：" + value);
+    } else throw Error("未知设置项 “" + key + "” · 可用 login / hotkey / corner / data");
+    } catch (const std::exception& error) { settingErrors_[key] = error.what(); refreshBuffer(); throw; }
+    refreshBuffer();
+}
+void Launcher::openCalc() { if (prompt_ || busy_) return; buffer_ = TerminalBuffer::calc; bufferOffset_ = 0; calcHistoryIndex_ = -1; calcError_.clear(); calcFeedback_.clear(); updateCalcPreview(); setInput(TerminalInput::calc, calcExpression_); }
+void Launcher::updateCalcPreview() { calcPreview_.clear(); if (!trim(calcExpression_).empty()) try { calcPreview_ = calculator::format(calculator::evaluate(calcExpression_)); } catch (const std::exception&) {} }
+void Launcher::submitCalc() {
+    if (busy_) return;
+    try {
+        auto expression = trim(calcExpression_); require(!expression.empty(), "请输入算式"); auto value = calculator::format(calculator::evaluate(expression));
+        std::erase_if(calcHistory_, [&](const auto& entry) { return entry.expression == expression; }); calcHistory_.insert(calcHistory_.begin(), {clockText(), expression, value}); if (calcHistory_.size() > 50) calcHistory_.pop_back();
+        calcExpression_ = expression; calcPreview_ = value; calcError_.clear(); calcFeedback_.clear(); calcHistoryIndex_ = -1; bufferOffset_ = 0; setInput(TerminalInput::calc, expression);
+    } catch (const std::exception& e) { calcError_ = e.what(); syncAccessibility(); invalidate(); }
+}
+void Launcher::browseCalc(int direction) { if (calcHistory_.empty()) return; int next = calcHistoryIndex_ < 0 ? 0 : calcHistoryIndex_ + direction; if (next >= 0 && next < static_cast<int>(calcHistory_.size())) selectCalc(next); }
+void Launcher::selectCalc(int index) {
+    if (index < 0 || index >= static_cast<int>(calcHistory_.size()) || prompt_ || busy_) return;
+    calcHistoryIndex_ = index; calcExpression_ = calcHistory_[index].expression; calcError_.clear(); calcFeedback_.clear(); updateCalcPreview();
+    if (index < bufferOffset_) bufferOffset_ = index; else if (index >= bufferOffset_ + 16) bufferOffset_ = index - 15;
+    setInput(TerminalInput::calc, calcExpression_);
+}
+void Launcher::copyCalc() {
+    try { auto value = calcHistoryIndex_ >= 0 ? calcHistory_[calcHistoryIndex_].value : calculator::format(calculator::evaluate(calcExpression_)); copyText(window_, wide(value)); calcFeedback_ = "已复制 " + value; }
+    catch (const std::exception& e) { calcFeedback_ = "没有可复制的结果：" + std::string(e.what()); }
+    SetTimer(window_, 6, 1400, nullptr); layoutInput(); syncAccessibility(); invalidate();
+}
+std::string Launcher::promptLabel() const { if (!prompt_) return ""; return prompt_->command + (prompt_->total ? " " + std::to_string(prompt_->step + 1) + "/" + std::to_string(prompt_->total) : "") + " › " + prompt_->field; }
+std::string Launcher::inputHint() const {
+    if (prompt_) return prompt_->error.empty() ? prompt_->hint : prompt_->error;
+    if (input_ == TerminalInput::command) return "Tab 补全 · ↑↓ 历史 · Esc 取消";
+    if (input_ == TerminalInput::search) return "Enter 打开 · Esc 清空";
+    if (input_ == TerminalInput::calc) return calcFeedback_.empty() ? "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭" : calcFeedback_;
+    return "";
+}
+std::string Launcher::modeLabel() const {
+    if (prompt_) return "PROMPT"; if (input_ == TerminalInput::command) return "COMMAND"; if (input_ == TerminalInput::search) return "SEARCH";
+    switch (buffer_) { case TerminalBuffer::settings: return "BUFFER:SETTINGS"; case TerminalBuffer::help: return "BUFFER:HELP"; case TerminalBuffer::log: return "BUFFER:LOG"; case TerminalBuffer::job: return "BUFFER:JOB"; case TerminalBuffer::calc: return "BUFFER:CALC"; default: break; }
+    if (busy_) return "BUSY"; if (!query_.empty()) return "SEARCH"; return organizing_ ? "ORGANIZE" : "NORMAL";
+}
+std::string Launcher::shortcuts() const {
+    if (busy_) return "正在处理，请稍候…";
+    if (prompt_) {
+        if (prompt_->command == "hotkey") return "组合键 录入新快捷键    Esc 取消录入";
+        if (prompt_->command == "delete") return "y 确认删除    N / Enter / Esc 取消删除";
+        if (prompt_->command == "edit") return "Tab / Shift+Tab 切换标题 / 网址    Enter 保存全部    Esc 取消";
+        std::string value;
+        if (!prompt_->choices.empty()) value = "Tab / ↑↓ " + std::string(prompt_->field == "path" || prompt_->field == "file" ? "补全路径" : "选择位置") + "    ";
+        if ((prompt_->command == "add" || prompt_->command == "move") && prompt_->step > 0) value += "Shift+Tab 返回上一步    ";
+        value += prompt_->command == "restore" ? "Enter 恢复并替换全部数据" : prompt_->command == "backup" ? "Enter 导出备份" : prompt_->command == "cd" ? "Enter 切换目录" : prompt_->command == "add" && prompt_->step < 2 ? "Enter 下一步" : "Enter 确认保存";
+        return value + "    Esc 取消";
+    }
+    if (input_ == TerminalInput::command) return "Tab / Shift+Tab 补全命令    ↑↓ 命令历史    Enter 执行命令    Esc 取消命令";
+    if (input_ == TerminalInput::search) return rows_.empty() ? "Enter 打开网址 / 网页搜索    Esc 清空并退出搜索" : "↑↓ 选择结果    Enter 打开结果    Esc 清空并退出搜索";
+    if (buffer_ == TerminalBuffer::calc) return "Enter / = 计算    ↑↓ 选择历史    c 复制结果    : 输入命令    Esc 关闭（保留算式与历史）";
+    if (buffer_ == TerminalBuffer::settings) return ": 输入命令    :help 查看帮助    Esc 返回书签";
+    if (buffer_ != TerminalBuffer::none) return "j/k / ↑↓ 滚动    g/G 首尾    PgUp/PgDn 翻屏    : 输入命令    Esc 返回书签";
+    auto row = selectedRow(); std::string value = "j/k 选择    Enter "; value += row && row->folder ? row->expanded ? "折叠文件夹    Tab 展开/折叠    r 重命名" : "展开文件夹    Tab 展开/折叠    r 重命名" : "打开书签    e 编辑    m 移动    c 复制链接";
+    if (organizing_ && row && !row->folder) value += "    Shift+↑/↓ 排序    D 删除";
+    else value += "    a 添加    n 文件夹    / 搜索";
+    return value + (organizing_ ? "    o/Esc 完成整理" : "    o 整理    Esc 返回/折叠/收起");
 }
 }

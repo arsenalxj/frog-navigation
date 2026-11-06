@@ -16,7 +16,6 @@ Options Options::parse() {
     for (int i = 1; i < count; ++i) {
         std::wstring arg = argv[i];
         if (arg == L"--background") options.background = true;
-        else if (arg == L"--offline") options.offline = true;
         else if (arg == L"--data-directory") {
             require(i + 1 < count && !std::wstring(argv[i + 1]).starts_with(L"--"), "--data-directory 需要目录路径。");
             options.dataDirectory = fs::absolute(argv[++i]).lexically_normal(); options.isolated = true;
@@ -29,14 +28,14 @@ Options Options::parse() {
 }
 Preferences Preferences::load(const Options& options) {
     Preferences prefs; prefs.dataDirectory = options.isolated ? options.dataDirectory : localDirectory() / L"Data";
-    if (options.isolated) { prefs.hotkey.enabled = false; return prefs; }
+    if (options.isolated) { prefs.hotkey.enabled = false; prefs.cornersEnabled = false; return prefs; }
     auto path = localDirectory() / L"preferences.json";
     if (!fs::exists(path)) return prefs;
     auto data = Json::parse(readFile(path, 1024 * 1024));
     prefs.dataDirectory = wide(data.value("dataDirectory", utf8(prefs.dataDirectory.wstring())));
     require(prefs.dataDirectory.is_absolute(), "偏好的数据目录必须为绝对路径。");
-    prefs.page = std::max(0, data.value("page", 0)); prefs.appearance = data.value("appearance", "system");
-    prefs.cornersEnabled = data.value("cornersEnabled", false); prefs.corners = data.value("corners", 0u) & 15;
+    prefs.expandedGroupIDs = data.value("expandedGroupIDs", std::vector<std::string>{});
+    prefs.cornersEnabled = data.value("cornersEnabled", true); prefs.corners = data.value("corners", 4u) & 15;
     if (data.contains("hotkey")) {
         const auto& key = data.at("hotkey");
         prefs.hotkey = {key.value("enabled", true), key.value("modifiers", UINT(MOD_CONTROL | MOD_ALT)), key.value("key", UINT(VK_SPACE))};
@@ -47,7 +46,7 @@ Preferences Preferences::load(const Options& options) {
 void Preferences::save(const Options& options) const {
     if (options.isolated) return;
     auto dir = localDirectory(); fs::create_directories(dir);
-    Json data{{"dataDirectory", utf8(dataDirectory.wstring())}, {"page", page}, {"appearance", appearance}, {"cornersEnabled", cornersEnabled}, {"corners", corners},
+    Json data{{"dataDirectory", utf8(dataDirectory.wstring())}, {"expandedGroupIDs", expandedGroupIDs}, {"cornersEnabled", cornersEnabled}, {"corners", corners},
         {"hotkey", {{"enabled", hotkey.enabled}, {"modifiers", hotkey.modifiers}, {"key", hotkey.key}}}};
     atomicWrite(dir / L"preferences.json", data.dump(2) + "\n");
 }
@@ -63,7 +62,11 @@ GlobalHotKey::~GlobalHotKey() { if (id_) UnregisterHotKey(window_, id_); }
 void GlobalHotKey::set(HWND window, const HotKey& key) {
     if (window_ == window && key == current_) return;
     if (key.enabled) {
-        require(key.modifiers != 0 && key.key != VK_ESCAPE && key.key != VK_F4, "请选择带 Ctrl、Alt、Shift 或 Win 的组合键。");
+        require((key.modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN)) != 0 && key.key != VK_ESCAPE && key.key != VK_F4,
+            "请选择至少包含 Ctrl、Alt 或 Win 的组合键。");
+        const bool navigation = key.key >= VK_PRIOR && key.key <= VK_DOWN;
+        const bool appCommand = key.modifiers == MOD_CONTROL && (key.key == 'N' || key.key == 'F' || key.key == 'Q' || key.key == 'H' || key.key == VK_OEM_COMMA);
+        require(!navigation && !appCommand, "该组合与应用内导航或命令冲突，请选择其他快捷键。");
         int next = id_ == 101 ? 102 : 101;
         require(RegisterHotKey(window, next, key.modifiers | MOD_NOREPEAT, key.key), "该快捷键已被系统或其他应用占用，原快捷键保持不变。");
         if (id_) UnregisterHotKey(window_, id_); id_ = next;
@@ -106,6 +109,15 @@ Corners::~Corners() { if (hook_) UnhookWindowsHookEx(hook_); if (active_ == this
 void Corners::configure(HWND window, bool enabled, unsigned mask) {
     if (hook_) { UnhookWindowsHookEx(hook_); hook_ = nullptr; }
     active_ = this; window_ = window; mask_ = mask; lastZone_ = -1;
+    POINT point{}; GetCursorPos(&point); lastMonitor_ = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)};
+    if (GetMonitorInfoW(lastMonitor_, &info)) {
+        const auto& r = info.rcMonitor;
+        if (point.x <= r.left + 2 && point.y <= r.top + 2) lastZone_ = 0;
+        else if (point.x >= r.right - 3 && point.y <= r.top + 2) lastZone_ = 1;
+        else if (point.x <= r.left + 2 && point.y >= r.bottom - 3) lastZone_ = 2;
+        else if (point.x >= r.right - 3 && point.y >= r.bottom - 3) lastZone_ = 3;
+    }
     if (enabled && mask) { hook_ = SetWindowsHookExW(WH_MOUSE_LL, hookProc, GetModuleHandleW(nullptr), 0); require(hook_ != nullptr, winError("无法启用屏幕触角")); }
 }
 LRESULT CALLBACK Corners::hookProc(int code, WPARAM wParam, LPARAM lParam) {
@@ -148,22 +160,6 @@ void setLoginStartup(bool enabled) {
     link->SetWorkingDirectory(executablePath().parent_path().c_str()); link->SetIconLocation(executablePath().c_str(), 0);
     ComPtr<IPersistFile> file; link.As(&file); check(file->Save(path.c_str(), TRUE), "无法保存启动快捷方式。");
 }
-RECT monitorWorkArea(HMONITOR monitor) {
-    MONITORINFO info{sizeof(info)}; require(GetMonitorInfoW(monitor, &info), "无法读取显示器信息。"); auto r = info.rcWork;
-    APPBARDATA data{sizeof(data)};
-    if (SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) {
-        for (UINT edge = ABE_LEFT; edge <= ABE_BOTTOM; ++edge) {
-            APPBARDATA bar{sizeof(bar)}; bar.uEdge = edge; bar.rc = info.rcMonitor;
-            if (SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &bar)) {
-                if (edge == ABE_LEFT) r.left = std::max(r.left, info.rcMonitor.left + 2);
-                if (edge == ABE_RIGHT) r.right = std::min(r.right, info.rcMonitor.right - 2);
-                if (edge == ABE_TOP) r.top = std::max(r.top, info.rcMonitor.top + 2);
-                if (edge == ABE_BOTTOM) r.bottom = std::min(r.bottom, info.rcMonitor.bottom - 2);
-            }
-        }
-    }
-    return r;
-}
 bool openUrl(const std::string& url) {
     if (!validUrl(url)) return false;
     return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", wide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
@@ -178,24 +174,6 @@ void copyText(HWND owner, const std::wstring& text) {
 void accessibleName(HWND window, const wchar_t* name) {
     ComPtr<IAccPropServices> properties;
     if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&properties)))) properties->SetHwndPropStr(window, static_cast<DWORD>(OBJID_CLIENT), CHILDID_SELF, PROPID_ACC_NAME, name);
-}
-std::optional<fs::path> chooseFile(HWND owner, bool save, bool folder) {
-    ComPtr<IFileDialog> dialog;
-    check(CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)), "无法打开文件选择器。");
-    DWORD flags{}; dialog->GetOptions(&flags); flags |= FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR;
-    if (folder) flags |= FOS_PICKFOLDERS; else if (save) flags |= FOS_OVERWRITEPROMPT; else flags |= FOS_FILEMUSTEXIST;
-    dialog->SetOptions(flags);
-    if (!folder) { COMDLG_FILTERSPEC filter[]{ {L"青蛙导航书签备份 (*.json)", L"*.json"} }; dialog->SetFileTypes(1, filter); dialog->SetDefaultExtension(L"json"); }
-    if (save) dialog->SetFileName(L"青蛙导航-Bookmarks.json");
-    auto result = dialog->Show(owner); if (result == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return {};
-    check(result, "文件选择器发生错误。"); ComPtr<IShellItem> item; check(dialog->GetResult(&item), "无法取得所选文件。");
-    PWSTR value{}; check(item->GetDisplayName(SIGDN_FILESYSPATH, &value), "无法取得文件路径。"); fs::path path(value); CoTaskMemFree(value); return path;
-}
-void Theme::update(const Preferences& preferences) {
-    HIGHCONTRASTW contrast{sizeof(contrast)}; SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0); highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    BOOL animation = TRUE; SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animation, 0); reducedMotion = !animation || highContrast;
-    DWORD light = 0, size = sizeof(light); RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
-    dark = preferences.appearance == "dark" || (preferences.appearance == "system" && !light);
 }
 Diagnostics::Diagnostics(const fs::path& path) {
     if (!path.empty()) { fs::create_directories(path.parent_path()); stream_.open(path, std::ios::app); require(stream_.is_open(), "无法创建诊断日志。"); }

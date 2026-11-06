@@ -34,7 +34,7 @@ public static class FrogProbe {
     }
 }
 '@
-$arguments = '--offline --data-directory "' + $data + '" --diagnostics "' + $log + '"'
+$arguments = '--data-directory "' + $data + '" --diagnostics "' + $log + '"'
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
 $process = Start-Process -FilePath $Executable -ArgumentList $arguments -WindowStyle Hidden -PassThru
 function Read-Events { if (Test-Path -LiteralPath $log) { @(Get-Content -LiteralPath $log -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
@@ -73,7 +73,7 @@ try {
     $cpu = ($process.TotalProcessorTime.TotalMilliseconds - $cpuBefore) / $sample.Elapsed.TotalMilliseconds * 100
     $gpu = @(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "pid_$($process.Id)_*" } | Select-Object Name,DedicatedUsage,SharedUsage)
     $report = [ordered]@{
-        date=(Get-Date).ToString('o'); executable=$Executable; sha256=(Get-FileHash -LiteralPath $Executable).Hash; count=$Count; offline=$true
+        date=(Get-Date).ToString('o'); executable=$Executable; sha256=(Get-FileHash -LiteralPath $Executable).Hash; count=$Count
         os=(Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,OSArchitecture)
         cpu=(Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors)
         ramBytes=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
