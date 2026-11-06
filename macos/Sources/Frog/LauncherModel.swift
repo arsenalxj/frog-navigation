@@ -641,7 +641,7 @@ final class LauncherModel: ObservableObject {
         case "r": beginRename()
         case "m": beginMove()
         case "D": requestDeleteSelection()
-        case "C": copySelection()
+        case "c", "C": copySelection()
         case "o": toggleOrganizing()
         case "z": toggleAllExpanded()
         case "?": openBuffer(.help)

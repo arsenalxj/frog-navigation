@@ -570,16 +570,145 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                        color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
             }
         }
-        D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回"
-               : model.buffer == .calc ? ": 命令 · Esc 关闭并保留算式" : ": 命令 · ? 帮助",
-               1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
-        if model.buffer == nil {
-            var x: CGFloat = 40
-            for (key, label) in [("j / k", "移动"), ("Enter", "打开 / 展开"), ("Tab", "展开 / 折叠"), ("z", "全部展开"), ("/", "搜索"), (":", "命令"), ("a", "添加"), ("n", "新建文件夹"), ("e", "编辑"), ("m", "移动"), ("D", "删除"), ("o", "排序整理"), ("?", "帮助")] {
-                let width = D.key(key, x: x, y: 856)
-                D.text(label, x + width + 6, 856.5, size: 11.5, color: D.muted)
-                x += width + 24 + D.width(label, size: 11.5)
+        if model.prompt == nil, model.inputKind == nil, !model.busy {
+            D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · ? 帮助",
+                   1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
+        }
+        drawShortcutHints()
+    }
+
+    private func drawShortcutHints() {
+        typealias D = TerminalDrawing
+        var x: CGFloat = 40
+        func key(_ key: String, _ label: String) {
+            let width = D.key(key, x: x, y: 856)
+            let labelWidth = D.width(label, size: 11.5)
+            D.text(label, x + width + 6, 856.5, size: 11.5, color: D.muted)
+            hit(NSRect(x: x, y: 845, width: width + 6 + labelWidth, height: 22), "\(key) \(label)")
+            x += width + 24 + labelWidth
+        }
+
+        // 与按键路由保持相同优先级，提示流不能泄漏底层列表或缓冲区的快捷键。
+        if model.busy {
+            D.text("正在处理，请稍候…", 40, 856.5, size: 11.5, color: D.muted)
+            return
+        }
+        if let prompt = model.prompt {
+            switch prompt.command {
+            case "hotkey":
+                key("组合键", "录入新快捷键")
+                key("Esc", "取消录入")
+                return
+            case "delete":
+                key("y", "确认删除")
+                key("N / Enter / Esc", "取消删除")
+                return
+            case "edit":
+                key("Tab / ⇧Tab", "切换标题 / 网址")
+                key("Enter", "保存全部")
+            default:
+                if !prompt.choices.isEmpty {
+                    key("Tab / ↑↓", prompt.field == "path" || prompt.field == "file" ? "补全路径" : "选择位置")
+                }
+                if (prompt.command == "add" || prompt.command == "move") && prompt.step > 0 {
+                    key("⇧Tab", "返回上一步")
+                }
+                let submit: String
+                switch prompt.command {
+                case "add":
+                    submit = prompt.step < 2 ? "下一步"
+                        : prompt.step == 2 ? "确认位置" : "创建并添加"
+                case "move": submit = prompt.step == 0 ? "确认目标" : "创建并移动"
+                case "rename": submit = "保存名称"
+                case "mkdir": submit = "创建文件夹"
+                case "backup": submit = "导出备份"
+                case "restore": submit = "恢复并替换全部数据"
+                case "cd": submit = "切换目录"
+                default: submit = "提交"
+                }
+                key("Enter", submit)
             }
+            key("Esc", "取消")
+            return
+        }
+        if model.inputKind == .command {
+            key("Tab / ⇧Tab", "补全命令")
+            key("↑↓", "命令历史")
+            key("Enter", "执行命令")
+            key("Esc", model.buffer == .calc ? "返回算式" : "取消命令")
+            return
+        }
+        if model.inputKind == .search {
+            if !model.items.isEmpty { key("↑↓", "选择结果") }
+            key("Enter", model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "结束搜索"
+                : model.items.isEmpty ? "打开网址 / 网页搜索" : "打开结果")
+            key("Esc", "清空并退出搜索")
+            return
+        }
+        if let buffer = model.buffer {
+            switch buffer {
+            case .calc:
+                if model.isCalcActive {
+                    key("Enter / =", "计算")
+                    if !model.calcHistory.isEmpty { key("↑↓", "选择历史") }
+                    key("c", "复制结果")
+                }
+                key(":", "命令")
+                key("Esc", model.isCalcActive ? "关闭并保留算式" : "返回算式")
+            case .settings:
+                key(":", "输入设置命令")
+                key(":help", "帮助")
+                key("Esc", "返回书签")
+            case .help, .log, .job:
+                key("j/k / ↑↓", "滚动")
+                key("PgUp / PgDn", "翻屏")
+                key("g / G", "首行 / 末行")
+                key(":", "命令")
+                if buffer == .log { key(":clear", "清空日志") }
+                key("/", "搜索书签")
+                key("Esc", "返回书签")
+            }
+            return
+        }
+
+        let selected = model.items.indices.contains(model.selectedIndex) ? model.items[model.selectedIndex] : nil
+        let searching = !model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let selected {
+            key("j/k / ↑↓", "选择")
+            if selected.kind == .folder {
+                key("Enter / Tab", selected.expanded ? "折叠" : "展开")
+                key("r", "重命名")
+            } else {
+                key("Enter", "打开")
+                if model.isOrganizing, model.query.isEmpty { key("⇧↑↓ / K/J", "调整顺序") }
+                else if !model.isOrganizing { key("e", "编辑") }
+                key("m", "移动")
+                key("c", "复制链接")
+            }
+            if selected.kind == .bookmark || !model.document.bookmarks.contains(where: { $0.groupId == selected.id }) {
+                key("D", "删除")
+            }
+        } else if searching {
+            key("Enter", "打开网址 / 网页搜索")
+        }
+        if !searching, !model.document.groups.isEmpty {
+            let allExpanded = model.document.groups.allSatisfy { model.expandedGroupIDs.contains($0.id) }
+            key("z", allExpanded ? "全部折叠" : "全部展开")
+        }
+        if !model.isOrganizing {
+            key("a", "添加")
+            key("n", "新建文件夹")
+            if !searching { key("o", "排序整理") }
+        }
+        key("/", "搜索")
+        key(":", "命令")
+        key("?", "帮助")
+        if model.isOrganizing { key("o / Esc", "完成整理") }
+        else if !model.query.isEmpty { key("Esc", "清空搜索") }
+        else if let groupID = model.selectedGroupID(), model.expandedGroupIDs.contains(groupID) {
+            key("Esc", "折叠当前文件夹")
+        } else {
+            key("Esc", model.expandedGroupIDs.isEmpty ? "收起窗口" : "折叠全部文件夹")
         }
     }
 
