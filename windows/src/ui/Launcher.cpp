@@ -11,6 +11,7 @@
 namespace frog {
 namespace {
 constexpr UINT timerReload = 5, timerCalcFeedback = 6;
+constexpr UINT wmAccessibilityFocus = WM_APP + 7;
 constexpr UINT32 paper = 0xfffef8, surface = 0xf8f4ed, line = 0xe4dfd7, ink = 0x0f1a20,
     muted = 0x695e45, green = 0x0d5e3a, purple = 0x7e1671, teal = 0x126e82,
     red = 0x7c1823, yellow = 0xe6c24d, mint = 0xadd5a2, forest = 0x1a3b2e;
@@ -115,6 +116,7 @@ void Launcher::show(bool settings) {
     layoutInput();
     if (textInputActive()) { SetFocus(search_); SendMessageW(search_, EM_SETSEL, savedSelectionStart_, savedSelectionEnd_); }
     else SetFocus(window_);
+    syncAccessibility();
     reload(); invalidate(); diagnostics_.event("show_requested", {{"first", firstShow_}});
 }
 void Launcher::hide() {
@@ -127,6 +129,7 @@ void Launcher::hide() {
         rebuildItems();
     }
     visible_ = false; paintPending_ = false; ShowWindow(window_, SW_HIDE); corners_.suppress(false); diagnostics_.event("hidden");
+    syncAccessibility();
 }
 void Launcher::quit() { if (busy_) { notify("正在处理数据，请完成后再退出。", true); return; } hide(); quitting_ = true; PostQuitMessage(0); }
 void Launcher::place(bool mouseMonitor) {
@@ -532,8 +535,10 @@ bool Launcher::keyboard(WPARAM key, bool control, bool shift) {
         if (key == VK_ESCAPE) { finishPrompt(); return true; }
         if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU || key == VK_LWIN || key == VK_RWIN) return true;
         UINT modifiers = (control ? MOD_CONTROL : 0) | (shift ? MOD_SHIFT : 0) | ((GetKeyState(VK_MENU) & 0x8000) ? MOD_ALT : 0) | (((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) ? MOD_WIN : 0);
-        require(modifiers != 0, "请使用 Ctrl、Alt、Shift 或 Win 组合键。"); auto prefs = preferences_; prefs.hotkey = {true, modifiers, static_cast<UINT>(key)}; updatePreferences(prefs); finishPrompt(); appendLog("已保存全局快捷键", green); return true;
+        auto prefs = preferences_; prefs.hotkey = {true, modifiers, static_cast<UINT>(key)}; updatePreferences(prefs); finishPrompt(); appendLog("已保存全局快捷键", green); return true;
     }
+    // AltGr 同时报告 Ctrl；保留给系统输入，不执行应用快捷键。
+    if (GetKeyState(VK_MENU) & 0x8000) return false;
     if (control) {
         if (key == 'Q') { quit(); return true; }
         if (key == 'H') { hide(); return true; }
@@ -544,10 +549,9 @@ bool Launcher::keyboard(WPARAM key, bool control, bool shift) {
         if (key == 'C' && !textInputActive() && !prompt_) { copySelection(); return true; }
         return false;
     }
-    if (GetKeyState(VK_MENU) & 0x8000) return false;
     if (key == VK_ESCAPE) { escape(); return true; }
     if (prompt_) {
-        if (!prompt_->acceptsText) { if (key == VK_PACKET) return false; if (key == 'Y' && prompt_->command == "delete") confirmDelete(); else if (key == 'N' || key == VK_RETURN) finishPrompt(); return true; }
+        if (!prompt_->acceptsText) { if (key == VK_PACKET) return false; if (key == VK_RETURN) finishPrompt(); return true; }
         if (key == VK_RETURN) { submitInput(); return true; }
         if (key == VK_TAB) { if (prompt_->command == "edit") switchEditField(); else if (shift) previousPrompt(); else cycleChoice(1); return true; }
         if ((key == VK_UP || key == VK_DOWN) && !prompt_->choices.empty()) { cycleChoice(key == VK_DOWN ? 1 : -1); return true; }
@@ -588,8 +592,7 @@ bool Launcher::character(wchar_t value) {
         if (value == L'=') { submitCalc(); return true; }
         if (value == L':') { setInput(TerminalInput::command); return true; }
         if (value == L'c' || value == L'C') { copyCalc(); return true; }
-        if (value < 32) return false;
-        return std::wstring_view(L"0123456789+-*/().eE （）").find(value) == std::wstring_view::npos;
+        return false;
     }
     if (textInputActive()) return false;
     if (prompt_) { if (prompt_->command == "delete") { if (value == L'y' || value == L'Y') confirmDelete(); else if (value == L'n' || value == L'N') finishPrompt(); } return true; }
@@ -636,7 +639,7 @@ void Launcher::click(float x, float y, bool activateRow) {
 }
 void Launcher::dragMove(float x, float y) {
     if (dragSource_.empty() || busy_ || prompt_) return;
-    if (std::hypot(x - dragX_, y - dragY_) > 5) dragging_ = true;
+    if (!dragging_ && std::hypot(x - dragX_, y - dragY_) > 5) { dragging_ = true; SetTimer(window_, 7, 80, nullptr); }
     if (!dragging_) return;
     dragCurrentX_ = x; dragCurrentY_ = y;
     if (y < 30) scroll(-1); else if (y > 626) scroll(1);
@@ -645,10 +648,10 @@ void Launcher::dragMove(float x, float y) {
     auto source = snapshot_.document.bookmark(dragSource_);
     bool merge = next >= 0 && source && !source->groupId && !rows_[next].folder && !rows_[next].group && dy >= 9 && dy <= 23;
     bool before = dy < 16;
-    if (next != dragTarget_ || merge != dragMerge_ || before != dragBefore_) {
+    if (next != dragTarget_ || merge != dragMerge_ || (!merge && before != dragBefore_)) {
         dragTarget_ = next; dragMerge_ = merge; dragBefore_ = before; mergeReady_ = false; dragHoverSince_ = milliseconds();
     }
-    SetTimer(window_, 7, 80, nullptr); invalidate();
+    invalidate();
 }
 void Launcher::dragEnd(float x, float y) {
     auto source = dragSource_, expected = dragExpected_; bool active = dragging_, merge = dragMerge_ && mergeReady_, before = dragBefore_;
@@ -724,7 +727,7 @@ void Launcher::syncAccessibility() {
     add("status", modeLabel(), shortcuts(), {0, 796, 1440, 36}, false, false, false);
     if (!logs_.empty() && !prompt_ && (buffer_ == TerminalBuffer::none || input_ == TerminalInput::command)) add("output", logs_.back().text, "最近操作日志", {40, 664, 1360, 72}, false, false, false);
     int focus = 0; for (const auto& node : nodes) if (node.selected) { focus = node.token; break; }
-    { std::lock_guard lock(accessibility_->mutex); accessibility_->nodes = std::move(nodes); accessibility_->focus = focus; }
+    updateAccessibility(accessibility_, provider_.Get(), std::move(nodes), focus);
     diagnostics_.event("terminal_state", {{"mode", modeLabel()}, {"input", inputText_}, {"prompt", prompt_ ? prompt_->command : ""}, {"field", prompt_ ? prompt_->field : ""}, {"step", prompt_ ? prompt_->step : 0}, {"selection", selection_}, {"rows", rows_.size()}, {"buffer", bufferName(buffer_)}, {"busy", busy_}, {"issue", issue_}, {"error", prompt_ ? prompt_->error : calcError_}});
 }
 void Launcher::accessibleAction(int token, bool focusOnly) {
@@ -739,6 +742,7 @@ void Launcher::accessibleAction(int token, bool focusOnly) {
 LRESULT CALLBACK Launcher::controlProc(HWND window, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR ref) {
     auto* self = reinterpret_cast<Launcher*>(ref);
     try {
+        if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) PostMessageW(self->window_, wmAccessibilityFocus, 0, 0);
         // UIA/COM 可运行嵌套消息泵；按键必须在控件过程处理，不能只依赖主循环。
         if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && self->keyboard(w, (GetKeyState(VK_CONTROL) & 0x8000) != 0, (GetKeyState(VK_SHIFT) & 0x8000) != 0)) return 0;
         if (msg == WM_CHAR && !self->composing_ && (w == VK_RETURN || w == VK_TAB || w == VK_ESCAPE)) return 0;
@@ -759,6 +763,8 @@ LRESULT Launcher::message(UINT msg, WPARAM w, LPARAM l) {
     auto x = [&] { return (GET_X_LPARAM(l) - originX_) / scale_; }; auto y = [&] { return (GET_Y_LPARAM(l) - originY_) / scale_; };
     switch (msg) {
     case WM_PAINT: paint(); return 0; case WM_ERASEBKGND: return 1;
+    case WM_SETFOCUS: case WM_KILLFOCUS: PostMessageW(window_, wmAccessibilityFocus, 0, 0); break;
+    case wmAccessibilityFocus: syncAccessibility(); return 0;
     case WM_CLOSE: hide(); return 0;
     case WM_SYSCOMMAND: if ((w & 0xfff0) == SC_MINIMIZE || (w & 0xfff0) == SC_CLOSE) { hide(); return 0; } break;
     case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && visible_ && !inMenu_ && !sameProcess(reinterpret_cast<HWND>(l))) hide(); return 0;

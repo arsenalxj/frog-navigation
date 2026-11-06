@@ -26,12 +26,31 @@ Options Options::parse() {
     }
     return options;
 }
+const char* HotKey::validationError() const {
+    if ((modifiers & ~(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN)) != 0 || key == 0 || key >= 255)
+        return "快捷键的修饰键或按键无效。";
+    if ((modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN)) == 0 || key == VK_ESCAPE || key == VK_F4)
+        return "请选择至少包含 Ctrl、Alt 或 Win 的组合键，且不要使用 Esc 或 F4。";
+    if (!(modifiers & MOD_ALT)) {
+        const bool navigation = key >= VK_PRIOR && key <= VK_DOWN;
+        const bool controlCommand = (modifiers & MOD_CONTROL) &&
+            (key == 'N' || key == 'F' || key == 'Q' || key == 'H' || key == VK_OEM_COMMA ||
+             key == 'A' || key == 'C' || key == 'X' || key == 'V' || key == 'Z' || key == 'Y' ||
+             key == VK_INSERT || key == VK_DELETE || key == VK_BACK);
+        if (navigation || controlCommand) return "该组合与应用内导航、命令或文本编辑冲突，请选择其他快捷键。";
+    }
+    return nullptr;
+}
 Preferences Preferences::load(const Options& options) {
     Preferences prefs; prefs.dataDirectory = options.isolated ? options.dataDirectory : localDirectory() / L"Data";
     if (options.isolated) { prefs.hotkey.enabled = false; prefs.cornersEnabled = false; return prefs; }
     auto path = localDirectory() / L"preferences.json";
     if (!fs::exists(path)) return prefs;
-    auto data = Json::parse(readFile(path, 1024 * 1024));
+    return decode(readFile(path, 1024 * 1024), prefs.dataDirectory);
+}
+Preferences Preferences::decode(const std::string& bytes, const fs::path& defaultDataDirectory) {
+    Preferences prefs; prefs.dataDirectory = defaultDataDirectory;
+    auto data = Json::parse(bytes);
     prefs.dataDirectory = wide(data.value("dataDirectory", utf8(prefs.dataDirectory.wstring())));
     require(prefs.dataDirectory.is_absolute(), "偏好的数据目录必须为绝对路径。");
     prefs.expandedGroupIDs = data.value("expandedGroupIDs", std::vector<std::string>{});
@@ -39,7 +58,7 @@ Preferences Preferences::load(const Options& options) {
     if (data.contains("hotkey")) {
         const auto& key = data.at("hotkey");
         prefs.hotkey = {key.value("enabled", true), key.value("modifiers", UINT(MOD_CONTROL | MOD_ALT)), key.value("key", UINT(VK_SPACE))};
-        require((prefs.hotkey.modifiers & ~(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN)) == 0 && prefs.hotkey.key > 0 && prefs.hotkey.key < 255, "偏好的快捷键无效。");
+        if (prefs.hotkey.validationError()) prefs.hotkey = HotKey{prefs.hotkey.enabled};
     }
     return prefs;
 }
@@ -62,11 +81,7 @@ GlobalHotKey::~GlobalHotKey() { if (id_) UnregisterHotKey(window_, id_); }
 void GlobalHotKey::set(HWND window, const HotKey& key) {
     if (window_ == window && key == current_) return;
     if (key.enabled) {
-        require((key.modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN)) != 0 && key.key != VK_ESCAPE && key.key != VK_F4,
-            "请选择至少包含 Ctrl、Alt 或 Win 的组合键。");
-        const bool navigation = key.key >= VK_PRIOR && key.key <= VK_DOWN;
-        const bool appCommand = key.modifiers == MOD_CONTROL && (key.key == 'N' || key.key == 'F' || key.key == 'Q' || key.key == 'H' || key.key == VK_OEM_COMMA);
-        require(!navigation && !appCommand, "该组合与应用内导航或命令冲突，请选择其他快捷键。");
+        if (const auto* error = key.validationError()) throw Error(error);
         int next = id_ == 101 ? 102 : 101;
         require(RegisterHotKey(window, next, key.modifiers | MOD_NOREPEAT, key.key), "该快捷键已被系统或其他应用占用，原快捷键保持不变。");
         if (id_) UnregisterHotKey(window_, id_); id_ = next;

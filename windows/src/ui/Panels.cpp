@@ -68,14 +68,13 @@ void Launcher::inputChanged() {
     auto raw = windowText(search_); auto value = utf8(raw);
     if (input_ == TerminalInput::command) commandHints(value, commandHints_);
     if (input_ == TerminalInput::calc) {
-        auto filtered = calculator::filtered(value);
-        if (filtered != value) {
+        auto normalized = calculator::normalize(value);
+        if (normalized != value) {
             DWORD start{}, end{}; SendMessageW(search_, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
-            auto mappedStart = wide(calculator::filtered(utf8(raw.substr(0, std::min<size_t>(start, raw.size()))))).size();
-            auto mappedEnd = wide(calculator::filtered(utf8(raw.substr(0, std::min<size_t>(end, raw.size()))))).size();
-            changingInput_ = true; SetWindowTextW(search_, wide(filtered).c_str()); SendMessageW(search_, EM_SETSEL, mappedStart, mappedEnd); changingInput_ = false;
+            // Normalization replaces single UTF-16 units; selection offsets stay unchanged.
+            changingInput_ = true; SetWindowTextW(search_, wide(normalized).c_str()); SendMessageW(search_, EM_SETSEL, start, end); changingInput_ = false;
         }
-        inputText_ = filtered; calcExpression_ = filtered; calcHistoryIndex_ = -1; calcError_.clear(); calcFeedback_.clear(); updateCalcPreview();
+        inputText_ = normalized; calcExpression_ = normalized; calcHistoryIndex_ = -1; calcError_.clear(); calcFeedback_.clear(); updateCalcPreview();
     } else {
         inputText_ = value;
         if (input_ == TerminalInput::search) { query_ = value; selection_ = scroll_ = 0; rebuildItems("__reset__"); }

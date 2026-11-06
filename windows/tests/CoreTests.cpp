@@ -56,6 +56,61 @@ int wmain(int argc, wchar_t** argv) {
     test("invalid-restore-preserves-current", [] { Temporary temp; Storage store; auto state = store.open(temp.path, false, sample()); atomicWrite(temp.path / "bad.json", "[]"); rejects([&] { store.restore(temp.path / "bad.json", state.bytes); }); expect(store.reload().document == state.document); });
     test("directory-watcher-atomic-replacement", [] { Temporary temp; Storage store; store.open(temp.path, false); std::atomic<int> changes{0}; DirectoryWatcher watcher; watcher.start(temp.path, [&] { ++changes; }); Sleep(80); atomicWrite(temp.path / "bookmarks.json", sample().encode()); for (int i = 0; i < 100 && changes == 0; ++i) Sleep(10); watcher.stop(); expect(changes > 0); });
     test("serial-queue-order", [] { std::vector<int> results; std::promise<void> done; { SerialQueue queue; for (int i = 0; i < 50; ++i) queue.post([&, i] { results.push_back(i); }); queue.post([&] { done.set_value(); }); expect(done.get_future().wait_for(std::chrono::seconds(3)) == std::future_status::ready); } for (int i = 0; i < 50; ++i) expect(results[i] == i); });
+    test("hotkey-rejects-invalid-combinations", [] {
+        for (const HotKey key : {HotKey{true, 0, VK_SPACE}, HotKey{true, MOD_SHIFT, 'A'},
+             HotKey{true, MOD_CONTROL | MOD_NOREPEAT, 'B'}, HotKey{true, MOD_ALT, 0},
+             HotKey{true, MOD_ALT, 255}, HotKey{true, MOD_CONTROL, VK_ESCAPE}, HotKey{true, MOD_ALT, VK_F4}}) {
+            const auto* error = key.validationError(); expect(error != nullptr);
+            GlobalHotKey registration; bool rejected = false;
+            try { registration.set(nullptr, key); }
+            catch (const Error& actual) { expect(std::string(actual.what()) == error); rejected = true; }
+            expect(rejected);
+        }
+    });
+    test("hotkey-protects-control-commands-and-text-editing", [] {
+        const UINT keys[]{'N', 'F', 'Q', 'H', VK_OEM_COMMA, 'A', 'C', 'X', 'V', 'Z', 'Y', VK_INSERT, VK_DELETE, VK_BACK, VK_PRIOR, VK_NEXT, VK_HOME, VK_END, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN};
+        for (UINT modifiers : {UINT(MOD_CONTROL), UINT(MOD_CONTROL | MOD_SHIFT), UINT(MOD_CONTROL | MOD_WIN), UINT(MOD_CONTROL | MOD_SHIFT | MOD_WIN)})
+            for (UINT key : keys)
+                expect(HotKey{true, modifiers, key}.validationError() != nullptr);
+    });
+    test("hotkey-keeps-default-and-alt-combinations", [] {
+        expect(HotKey{}.validationError() == nullptr);
+        expect(HotKey{true, MOD_CONTROL, 'B'}.validationError() == nullptr);
+        expect(HotKey{true, MOD_WIN, VK_SPACE}.validationError() == nullptr);
+        const UINT keys[]{'N', 'F', 'Q', 'H', VK_OEM_COMMA, 'A', 'C', 'X', 'V', 'Z', 'Y', VK_SPACE, VK_HOME, VK_LEFT};
+        for (UINT modifiers : {UINT(MOD_ALT), UINT(MOD_CONTROL | MOD_ALT), UINT(MOD_ALT | MOD_SHIFT), UINT(MOD_CONTROL | MOD_ALT | MOD_SHIFT)})
+            for (UINT key : keys)
+                expect(HotKey{true, modifiers, key}.validationError() == nullptr);
+    });
+    test("preferences-normalize-legacy-hotkeys-preserving-enabled", [] {
+        Temporary temp;
+        for (const HotKey invalid : {HotKey{true, MOD_SHIFT, 'A'}, HotKey{true, 0, 'A'}, HotKey{true, MOD_CONTROL, 'A'},
+             HotKey{true, MOD_CONTROL, 'C'}, HotKey{true, MOD_CONTROL | MOD_SHIFT, 'N'}, HotKey{true, MOD_CONTROL | MOD_SHIFT, 'V'},
+             HotKey{true, MOD_ALT | MOD_NOREPEAT, 'B'}, HotKey{true, MOD_ALT, 0}, HotKey{true, MOD_ALT, 255}}) {
+            for (bool enabled : {false, true}) {
+                Json data{{"hotkey", {{"enabled", enabled}, {"modifiers", invalid.modifiers}, {"key", invalid.key}}},
+                    {"cornersEnabled", false}, {"corners", 3}, {"expandedGroupIDs", {"saved-group"}}};
+                auto prefs = Preferences::decode(data.dump(), temp.path);
+                expect(prefs.hotkey == HotKey{enabled});
+                expect(prefs.dataDirectory == temp.path && !prefs.cornersEnabled && prefs.corners == 3);
+                expect(prefs.expandedGroupIDs == std::vector<std::string>{"saved-group"});
+            }
+        }
+    });
+    test("preferences-preserve-valid-hotkeys-and-defaults", [] {
+        Temporary temp;
+        expect(Preferences::decode("{}", temp.path).hotkey == HotKey{});
+        for (HotKey key : {HotKey{}, HotKey{true, MOD_ALT, 'A'}, HotKey{true, MOD_CONTROL | MOD_ALT | MOD_SHIFT, 'N'}}) {
+            for (bool enabled : {false, true}) {
+                key.enabled = enabled;
+                Json data{{"hotkey", {{"enabled", key.enabled}, {"modifiers", key.modifiers}, {"key", key.key}}}};
+                expect(Preferences::decode(data.dump(), temp.path).hotkey == key);
+            }
+        }
+        Options options; options.isolated = true; options.dataDirectory = temp.path;
+        auto isolated = Preferences::load(options);
+        expect(isolated.hotkey == HotKey{false} && !isolated.cornersEnabled && isolated.dataDirectory == temp.path);
+    });
     test("global-hotkey-conflict-keeps-old", [] { auto a = CreateWindowExW(0, L"STATIC", L"FrogTestA", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr); auto b = CreateWindowExW(0, L"STATIC", L"FrogTestB", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr); ScopeExit close{[&] { DestroyWindow(a); DestroyWindow(b); }}; GlobalHotKey first, second; HotKey key{true, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F23}; first.set(a, key); rejects([&] { second.set(b, key); }); first.set(a, {false}); second.set(b, key); });
     std::cout << passed << " passed, " << failed << " failed\n"; return failed ? 1 : 0;
 }

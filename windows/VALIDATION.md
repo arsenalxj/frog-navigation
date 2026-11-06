@@ -83,3 +83,55 @@ CTest **3/3 通过**：`core`、`terminal-features`、`native-smoke`。本轮最
 ### 透明托盘图标
 
 独立 Release 已重新构建。使用 Windows `LoadLibraryEx` / `LoadImage` 从实际 EXE 加载托盘资源 102，16、24、32、48、64、128、256 七档均通过透明角落与不透明主体检查，并已查看 `build/arrow-review/tray-preview.png` 的完整青蛙轮廓。原资源 101 仍用于应用图标。本轮未替换正在运行的版本，未在 Explorer 托盘现场截图；透明效果验证来自实际 Windows 图标资源加载结果。
+
+## 2026-11-06：Windows 重构审查修复
+
+修复本轮保留的八项问题：AltGr 误触发退出、UIA 事件缺失、小写 n 取消删除后误开新建文件夹、旧热键规则迁移、全局热键占用应用及文本快捷键、计算器输入静默变义、拖动悬停计时器反复重置、烟测拖动源空指针。
+
+### 构建与回归
+
+在 `build/review-fixes/` 独立构建 MSVC x64 Release，未覆盖正在运行的版本、默认构建产物或安装包。使用本机 Visual Studio 18 2026 附带的 CMake / CTest，命令等价于：
+
+```powershell
+cmake -S windows -B windows/build/review-fixes -G "Visual Studio 18 2026" -A x64
+cmake --build windows/build/review-fixes --config Release --parallel
+ctest --test-dir windows/build/review-fixes -C Release --output-on-failure
+```
+
+完整 CTest **3/3 通过**：`core` 0.38 秒、`terminal-features` 0.22 秒、`native-smoke` 13.22 秒，总计 13.83 秒。随后移除计算器错误文案耦合断言，保留行为与边界断言；重新构建并运行 `terminal-features`，通过（0.43 秒）。
+
+新增核心回归覆盖热键统一校验、旧配置默认回退及启停语义，以及 Unicode 算式、未知字符、超长表达式的无损拒绝。数据解析使用隔离输入，不读取或修改正式偏好。
+
+### 原生交互证据
+
+`FrogSmoke` 使用真实 `Frog.exe`、SendInput、UIA 事件订阅及磁盘结果验证：
+
+- `delete-lowercase-n-cancels-without-new-prompt`：小写 n 取消删除后可以正常输入下一条命令，书签不变。
+- `altgr-chord-preserves-process-and-draft`：Ctrl+Alt+Q 不退出，后续字符继续进入原草稿。
+- `calc-unicode-paste-invalid-and-overlong-preserved`：真实剪贴板粘贴 `１０÷４` 得到 2.5，`2×3` 得到 6；未知字符与超长算式保留、报错且不进入历史。
+- `drag-merge-with-continuous-pointer-motion`：目标中心持续微动（20 ms 间隔），两条根书签仍合并成文件夹；完成后恢复隔离种子数据。
+- `uia-focus-structure-events-and-native-input-focus`：键盘选择收到目标虚拟节点焦点事件，展开树收到可读取新增子项的结构事件；原生编辑框拥有焦点时，虚拟选中行不冒领焦点。
+
+旧版对照使用 `build/arrow-review/Release/Frog.exe`，仅执行新增审查回归，不重跑旧验收失败流程。旧版在小写 n 取消删除后进入 `mkdir`，把后续 `:help` 当作名称输入，回归失败；证据位于 `build/review-fixes/Testing/before/application.jsonl`。修复版针对性回归及完整原生流程均通过。
+
+完整运行的诊断与截图位于 `build/review-fixes/Testing/artifacts/`；已查看 `calculator-history.png`。测试报告位于 `build/review-fixes/Testing/Temporary/LastTest.log`；最后一次为单独的计算器行为回归。可单独执行新增场景：
+
+```powershell
+.\windows\build\review-fixes\Release\FrogSmoke.exe .\windows\build\review-fixes\Release\Frog.exe .\windows\build\review-fixes\Testing\review-only --review-only
+```
+
+### 验证边界
+
+真实 UIA 事件订阅通过不等于已验证 Narrator / NVDA 口述体验；Ctrl+Alt 真实输入验证不等于已遍历所有 AltGr 键盘布局。本轮未现场验证不同中文 IME 候选流程、多显示器 DPI、系统登录启动或托盘显示，未打包 ZIP、未提交或推送；正式书签与偏好未改写。
+
+### 正式安装更新
+
+验收通过后，将本轮 Release 可执行文件覆盖到正式安装目录 `C:\Program Files\Frog`；未打包 ZIP。
+
+- 覆盖前备份完整旧安装到 `frog-navigation-history/windows-install-20261106-163549/`，旧 `Frog.exe` SHA-256 为 `64A74D79…F814C7`。
+- 正式 `Frog.exe` 替换后 SHA-256 为 `C81AC519…47D3C`，与 `build/review-fixes/Release/Frog.exe` 完全一致；`README.md`、`VALIDATION.md`、`install.ps1`、`uninstall.ps1` 一并同步。
+- 用 `--data-directory` 隔离实例从正式路径启动：`process_started` 与 `data_loaded` 正常，进程稳定运行后正常结束。
+- 用真实偏好（数据目录指向坚果云同步目录）只读启动：读取 78 条书签，无 `load_failed`；书签文件与 `preferences.json` 时间戳均未变化。
+- 原目录缺少安装脚本要求的 `.frog-install.json`，已按 `install.ps1` 标记格式补齐（`application=Frog`、目标目录、`version=1.0.0`），使后续更新与卸载脚本可正常校验。登录启动快捷方式原先指向同一路径，未改动。
+- 既有全局热键为 `Alt+Space`（`modifiers=1`），符合本轮新规则，未发生迁移；本轮未现场验证该组合是否被系统占用。
+

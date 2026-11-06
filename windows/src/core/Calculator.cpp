@@ -4,7 +4,6 @@
 #include <cmath>
 #include <icu.h>
 #include <limits>
-#include <algorithm>
 #include <cstdlib>
 #include <locale.h>
 #include <string_view>
@@ -78,24 +77,21 @@ public:
 }
 std::string normalize(const std::string& source) {
     auto text = wide(source);
-    for (auto& c : text) { if (c == L'（') c = L'('; else if (c == L'）') c = L')'; }
-    return utf8(text);
-}
-std::string filtered(const std::string& source) {
-    auto text = wide(normalize(source)); std::wstring result; result.reserve((std::min)(text.size(), maxLength));
-    UErrorCode error = U_ZERO_ERROR;
-    auto* iterator = ubrk_open(UBRK_CHARACTER, "", reinterpret_cast<const UChar*>(text.data()), static_cast<int32_t>(text.size()), &error);
-    require(U_SUCCESS(error) && iterator, "无法检查文字长度。");
-    ScopeExit close{[&] { ubrk_close(iterator); }};
-    size_t count = 0; int32_t start = ubrk_first(iterator);
-    for (int32_t end = ubrk_next(iterator); end != UBRK_DONE; start = end, end = ubrk_next(iterator)) {
-        bool allowed = end == start + 1 && std::wstring_view(L"0123456789+-*/().eE").find(text[start]) != std::wstring_view::npos;
-        bool whitespace = true;
-        for (int32_t i = start; i < end; ++i) whitespace = whitespace && space(text[i]);
-        if (!allowed && !whitespace) continue;
-        result.append(text, start, end - start); if (++count == maxLength) break;
+    for (auto& c : text) {
+        if (c >= L'０' && c <= L'９') c = static_cast<wchar_t>(L'0' + (c - L'０'));
+        else switch (c) {
+        case L'×': case L'＊': c = L'*'; break;
+        case L'÷': case L'／': c = L'/'; break;
+        case L'＋': c = L'+'; break;
+        case L'－': c = L'-'; break;
+        case L'（': c = L'('; break;
+        case L'）': c = L')'; break;
+        case L'．': c = L'.'; break;
+        case L'ｅ': c = L'e'; break;
+        case L'Ｅ': c = L'E'; break;
+        }
     }
-    return utf8(result);
+    return utf8(text);
 }
 std::string format(double value) {
     if (!std::isfinite(value)) return "无法计算";

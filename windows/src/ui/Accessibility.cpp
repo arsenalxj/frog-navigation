@@ -4,6 +4,12 @@
 
 namespace frog {
 namespace {
+bool ownsKeyboardFocus(HWND window) {
+    if (!window || !IsWindowVisible(window) || GetForegroundWindow() != GetAncestor(window, GA_ROOT)) return false;
+    GUITHREADINFO info{sizeof(info)};
+    DWORD thread = GetWindowThreadProcessId(window, nullptr);
+    return thread && GetGUIThreadInfo(thread, &info) && info.hwndFocus == window;
+}
 class Provider final : public IRawElementProviderSimple, public IRawElementProviderFragment, public IRawElementProviderFragmentRoot, public IInvokeProvider, public ISelectionItemProvider, public ISelectionProvider {
 public:
     explicit Provider(std::shared_ptr<AccessibleState> state, int token = 0) : state_(std::move(state)), token_(token) {}
@@ -40,15 +46,17 @@ public:
         case UIA_HelpTextPropertyId: string(node ? node->help : L"方向键或 j/k 选择，Enter 打开，e 编辑，D 删除，冒号输入命令。"); break;
         case UIA_IsKeyboardFocusablePropertyId: case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: boolean(true); break;
         case UIA_IsEnabledPropertyId: boolean(!node || node->enabled); break;
-        case UIA_HasKeyboardFocusPropertyId: boolean(state_->focus == token_); break;
+        case UIA_HasKeyboardFocusPropertyId: boolean(state_->focus == token_ && ownsKeyboardFocus(state_->window)); break;
         case UIA_IsOffscreenPropertyId: boolean(!IsWindowVisible(state_->window)); break;
         }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(IRawElementProviderSimple** value) override {
         if (!value) return E_POINTER; *value = nullptr;
-        std::lock_guard lock(state_->mutex); if (!state_->window) return UIA_E_ELEMENTNOTAVAILABLE;
-        return token_ ? S_OK : UiaHostProviderFromHwnd(state_->window, value);
+        HWND window{};
+        { std::lock_guard lock(state_->mutex); window = state_->window; }
+        if (!window) return UIA_E_ELEMENTNOTAVAILABLE;
+        return token_ ? S_OK : UiaHostProviderFromHwnd(window, value);
     }
     HRESULT STDMETHODCALLTYPE Navigate(NavigateDirection direction, IRawElementProviderFragment** value) override {
         if (!value) return E_POINTER; *value = nullptr; std::lock_guard lock(state_->mutex);
@@ -89,7 +97,10 @@ public:
         *value = child(0); return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetFocus(IRawElementProviderFragment** value) override {
-        if (!value) return E_POINTER; std::lock_guard lock(state_->mutex); if (!state_->window) return UIA_E_ELEMENTNOTAVAILABLE; *value = child(state_->focus); return S_OK;
+        if (!value) return E_POINTER; *value = nullptr;
+        std::lock_guard lock(state_->mutex); if (!state_->window) return UIA_E_ELEMENTNOTAVAILABLE;
+        if (state_->focus >= 0 && ownsKeyboardFocus(state_->window)) *value = child(state_->focus);
+        return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Invoke() override { return invoke(false); }
     HRESULT STDMETHODCALLTYPE Select() override { return invoke(true); }
@@ -118,4 +129,38 @@ private:
 };
 }
 IRawElementProviderSimple* createAccessibility(const std::shared_ptr<AccessibleState>& state) { return new Provider(state); }
+void updateAccessibility(const std::shared_ptr<AccessibleState>& state, IRawElementProviderSimple* root, std::vector<AccessibleNode> nodes, int focus) {
+    bool structureChanged = false, focusChanged = false;
+    unsigned long long focusRevision{};
+    {
+        std::lock_guard lock(state->mutex);
+        if (!state->window) return;
+        structureChanged = !std::equal(state->nodes.begin(), state->nodes.end(), nodes.begin(), nodes.end(),
+            [](const AccessibleNode& left, const AccessibleNode& right) {
+                return left.token == right.token && left.name == right.name && left.help == right.help
+                    && EqualRect(&left.bounds, &right.bounds) && left.enabled == right.enabled && left.folder == right.folder;
+            });
+        if (!ownsKeyboardFocus(state->window)) focus = -1;
+        else if (focus > 0 && std::none_of(nodes.begin(), nodes.end(), [focus](const AccessibleNode& node) { return node.token == focus; })) focus = 0;
+        focusChanged = state->focus != focus;
+        state->nodes = std::move(nodes);
+        state->focus = focus;
+        if (focusChanged) ++state->focusRevision;
+        focusRevision = state->focusRevision;
+    }
+    if (!root || (!structureChanged && !focusChanged) || !UiaClientsAreListening()) return;
+    // UIA can synchronously query providers or run a nested message loop.
+    // Keep providers alive, but never hold the state mutex across UIA calls.
+    ComPtr<IRawElementProviderSimple> rootProvider(root);
+    if (structureChanged) UiaRaiseStructureChangedEvent(rootProvider.Get(), StructureChangeType_ChildrenInvalidated, nullptr, 0);
+    if (!focusChanged || focus < 0) return;
+    {
+        std::lock_guard lock(state->mutex);
+        if (state->focusRevision != focusRevision || state->focus != focus || !ownsKeyboardFocus(state->window)) return;
+    }
+    ComPtr<IRawElementProviderSimple> focusedProvider;
+    if (focus) focusedProvider.Attach(new Provider(state, focus));
+    else focusedProvider = rootProvider;
+    UiaRaiseAutomationEvent(focusedProvider.Get(), UIA_AutomationFocusChangedEventId);
+}
 }

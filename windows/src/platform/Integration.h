@@ -9,7 +9,12 @@ struct Options {
     fs::path dataDirectory, diagnostics;
     static Options parse();
 };
-struct HotKey { bool enabled = true; UINT modifiers = MOD_CONTROL | MOD_ALT, key = VK_SPACE; bool operator==(const HotKey&) const = default; };
+struct HotKey {
+    bool enabled = true;
+    UINT modifiers = MOD_CONTROL | MOD_ALT, key = VK_SPACE;
+    bool operator==(const HotKey&) const = default;
+    const char* validationError() const;
+};
 struct Preferences {
     fs::path dataDirectory;
     HotKey hotkey;
@@ -17,6 +22,7 @@ struct Preferences {
     unsigned corners = 4;
     std::vector<std::string> expandedGroupIDs;
     static Preferences load(const Options& options);
+    static Preferences decode(const std::string& bytes, const fs::path& defaultDataDirectory);
     void save(const Options& options) const;
 };
 std::wstring hotkeyName(const HotKey& key);

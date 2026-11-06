@@ -7,6 +7,9 @@
 #include <iterator>
 #include <utility>
 #include <string_view>
+#include <wrl/implements.h>
+#include <atomic>
+#include <mutex>
 
 using namespace frog;
 namespace {
@@ -83,7 +86,7 @@ void send(std::vector<INPUT>& input) {
     expect(SendInput(static_cast<UINT>(input.size()), input.data(), sizeof(INPUT)) == input.size(), "真实键盘或鼠标输入失败");
 }
 
-void key(WORD code, WORD modifier = 0) {
+void key(WORD code, WORD modifier = 0, WORD secondModifier = 0) {
     std::vector<INPUT> input;
     auto append = [&](WORD value, bool up) {
         if (value == VK_SHIFT) value = VK_LSHIFT;
@@ -98,8 +101,10 @@ void key(WORD code, WORD modifier = 0) {
         input.push_back(event);
     };
     if (modifier) append(modifier, false);
+    if (secondModifier) append(secondModifier, false);
     append(code, false);
     append(code, true);
+    if (secondModifier) append(secondModifier, true);
     if (modifier) append(modifier, true);
     send(input);
 }
@@ -161,7 +166,7 @@ void clickElement(IUIAutomationElement* element) {
     expect(rectangle.right > rectangle.left && rectangle.bottom > rectangle.top, "UIA 条目不可见");
     click({rectangle.left + (rectangle.right - rectangle.left) / 2, rectangle.top + (rectangle.bottom - rectangle.top) / 2});
 }
-void dragElement(IUIAutomationElement* source, IUIAutomationElement* target) {
+void dragElement(IUIAutomationElement* source, IUIAutomationElement* target, bool hoverWithMotion = false) {
     expect(source && target, "拖动源或目标不可见"); RECT from{}, to{};
     check(source->get_CurrentBoundingRectangle(&from), "无法读取拖动源");
     check(target->get_CurrentBoundingRectangle(&to), "无法读取拖动目标");
@@ -174,7 +179,17 @@ void dragElement(IUIAutomationElement* source, IUIAutomationElement* target) {
         event.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
     };
     point(input[0], from); input[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    point(input[2], to); input[3].mi.dwFlags = MOUSEEVENTF_LEFTUP; send(input);
+    point(input[2], to); input[3].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    if (!hoverWithMotion) { send(input); return; }
+    INPUT release = input.back(); input.pop_back(); send(input);
+    ScopeExit releaseMouse{[&] { SendInput(1, &release, sizeof(INPUT)); }};
+    // 始终在合并热区内微动，间隔小于拖动定时器；不能因重设计时器或跨中线而失去悬停。
+    for (int i = 0; i < 50; ++i) {
+        RECT jitter = to; const int offset = (i % 2) ? 1 : -1;
+        jitter.top += offset; jitter.bottom += offset;
+        INPUT move{}; move.type = INPUT_MOUSE; point(move, jitter);
+        expect(SendInput(1, &move, sizeof(INPUT)) == 1, "无法发送拖动悬停微动"); Sleep(20);
+    }
 }
 
 void invoke(IUIAutomationElement* element) {
@@ -395,6 +410,108 @@ const Bookmark* titled(const Document& data, const std::string& title) {
     return found == data.bookmarks.end() ? nullptr : &*found;
 }
 
+class AccessibilityEvents final : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUIAutomationFocusChangedEventHandler, IUIAutomationStructureChangedEventHandler> {
+public:
+    DWORD process{};
+    std::atomic<bool> expanded{false};
+    std::mutex mutex;
+    std::wstring focused;
+    bool matches(IUIAutomationElement* sender) const {
+        int id{}; return sender && SUCCEEDED(sender->get_CurrentProcessId(&id)) && static_cast<DWORD>(id) == process;
+    }
+    HRESULT STDMETHODCALLTYPE HandleFocusChangedEvent(IUIAutomationElement* sender) override {
+        if (!matches(sender)) return S_OK;
+        BSTR id{}, name{};
+        if (SUCCEEDED(sender->get_CurrentAutomationId(&id)) && id && std::wstring_view(id).starts_with(L"Frog.Item.") && SUCCEEDED(sender->get_CurrentName(&name))) {
+            std::lock_guard lock(mutex); focused = name ? name : L"";
+        }
+        SysFreeString(id); SysFreeString(name); return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE HandleStructureChangedEvent(IUIAutomationElement* sender, StructureChangeType type, SAFEARRAY*) override {
+        if (!matches(sender) || type != StructureChangeType_ChildrenInvalidated) return S_OK;
+        // 回调内重新查询树，既检查已发布的新结构，也覆盖Provider锁重入。
+        ComPtr<IUIAutomation> automation;
+        if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation)))) {
+            try { if (named(automation.Get(), sender, L"文件夹中的中文书签")) expanded = true; } catch (const std::exception&) {}
+        }
+        return S_OK;
+    }
+    bool focusedOn(const wchar_t* name) { std::lock_guard lock(mutex); return focused == name; }
+};
+
+void reviewRegressions(Terminal& terminal, HWND window, HANDLE process, const fs::path& directory, const fs::path& log, const Document& seed, const std::string& first, const std::string& second) {
+    terminal.select(L"排序甲");
+    terminal.command(L"delete"); terminal.field("delete", "confirm"); key('N');
+    terminal.command(L"help"); terminal.buffer("help");
+    expect(document(directory) == seed, "小写n取消删除修改了书签");
+    key(VK_ESCAPE); terminal.buffer("");
+    std::cout << "PASS delete-lowercase-n-cancels-without-new-prompt\n";
+
+    terminal.command(L"add"); terminal.field("add", "url"); terminal.replace(L"https://example.com/");
+    key('Q', VK_CONTROL, VK_MENU); type(L"sentinel");
+    expect(waitFor([&] { return WaitForSingleObject(process, 0) == WAIT_OBJECT_0 || terminal.state().value("input", "").ends_with("sentinel"); }), "AltGr组合后的输入未到达草稿");
+    expect(WaitForSingleObject(process, 0) == WAIT_TIMEOUT, "AltGr+Q错误触发了退出");
+    terminal.field("add", "url");
+    expect(terminal.state().value("input", "").starts_with("https://example.com/"), "AltGr输入丢失原始草稿");
+    key(VK_ESCAPE); terminal.idle();
+    std::cout << "PASS altgr-chord-preserves-process-and-draft\n";
+
+    terminal.command(L"calc"); terminal.buffer("calc");
+    auto paste = [&](const std::wstring& text) { copyText(window, text); key('A', VK_CONTROL); key('V', VK_CONTROL); };
+    paste(L"１０÷４"); terminal.inputIs(L"10/4"); key(VK_RETURN);
+    expect(waitFor([&] { return terminal.element(L"10/4 = 2.5") != nullptr; }), "Unicode粘贴除法变成了另一算式");
+    paste(L"2×3"); terminal.inputIs(L"2*3"); key(VK_RETURN);
+    expect(waitFor([&] { return terminal.element(L"2*3 = 6") != nullptr; }), "Unicode粘贴乘法结果错误");
+    paste(L"2&3"); terminal.inputIs(L"2&3"); key(VK_RETURN);
+    terminal.stateIs([](const Json& state) { return !state.value("error", "").empty(); }, "未知字符算式未报错");
+    key(VK_UP); terminal.inputIs(L"2*3");
+    const std::wstring overlong = L"1" + std::wstring(255, L' ') + L"+2";
+    paste(overlong); terminal.inputIs(overlong); key(VK_RETURN);
+    terminal.stateIs([](const Json& state) { return !state.value("error", "").empty(); }, "超长算式被截成有效前缀");
+    key(VK_UP); terminal.inputIs(L"2*3");
+    terminal.command(L"calc clear"); key(VK_ESCAPE); terminal.buffer("");
+    std::cout << "PASS calc-unicode-paste-invalid-and-overlong-preserved\n";
+
+    terminal.command(L"group root");
+    auto source = terminal.element(L"排序甲"); expect(source != nullptr, "悬停合并缺少源书签");
+    check(source->SetFocus(), "无法选中悬停合并源"); terminal.focused(L"排序甲"); type(L"o");
+    dragElement(source.Get(), terminal.element(L"排序乙").Get(), true);
+    awaitDocument(directory, [&](const Document& data) {
+        auto a = data.bookmark(first), b = data.bookmark(second);
+        return a && b && a->groupId && a->groupId == b->groupId && data.groups.size() == seed.groups.size() + 1;
+    }, "持续微动悬停没有将两条根书签合并成文件夹");
+    terminal.idle(); key(VK_ESCAPE);
+    const auto updates = events(log, "external_updated").size();
+    atomicWrite(directory / L"bookmarks.json", seed.encode());
+    expect(waitFor([&] { return events(log, "external_updated").size() > updates; }), "回归后无法恢复隔离种子数据");
+    terminal.command(L"group root"); terminal.idle();
+    std::cout << "PASS drag-merge-with-continuous-pointer-motion\n";
+
+    ComPtr<IUIAutomation> automation; ComPtr<IUIAutomationElement> root;
+    check(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation)), "无法创建事件订阅客户端");
+    check(automation->ElementFromHandle(window, &root), "无法查询事件订阅根节点");
+    auto observer = Microsoft::WRL::Make<AccessibilityEvents>(); GetWindowThreadProcessId(window, &observer->process);
+    check(automation->AddFocusChangedEventHandler(nullptr, observer.Get()), "无法订阅焦点事件");
+    ScopeExit removeFocus{[&] { automation->RemoveFocusChangedEventHandler(observer.Get()); }};
+    check(automation->AddStructureChangedEventHandler(root.Get(), TreeScope_Subtree, nullptr, observer.Get()), "无法订阅结构事件");
+    ScopeExit removeStructure{[&] { automation->RemoveStructureChangedEventHandler(root.Get(), observer.Get()); }};
+    clickElement(terminal.element(L"排序甲").Get()); terminal.focused(L"排序甲");
+    key(VK_DOWN); terminal.focused(L"排序乙");
+    expect(waitFor([&] { return observer->focusedOn(L"排序乙"); }), "键盘选择变化没有发送目标UIA焦点事件");
+    type(L":"); terminal.inputIs(L"");
+    terminal.stateIs([](const Json& state) { return state.value("mode", "") == "COMMAND"; }, "未进入命令输入");
+    BOOL rowFocused = TRUE;
+    auto selected = terminal.element(L"排序乙"); expect(selected != nullptr, "输入期间选中行消失");
+    check(selected->get_CurrentHasKeyboardFocus(&rowFocused), "无法读取虚拟行焦点");
+    expect(!rowFocused, "原生输入框焦点被虚拟选中行冒领");
+    key(VK_ESCAPE); terminal.focused(L"排序乙");
+    invoke(terminal.element(L"树展开验收").Get());
+    expect(waitFor([&] { return observer->expanded.load(); }), "展开树没有发送可读取新子项的结构事件");
+    invoke(terminal.element(L"树展开验收").Get());
+    expect(waitFor([&] { return terminal.element(L"文件夹中的中文书签") == nullptr; }), "事件回归后树未折叠");
+    std::cout << "PASS uia-focus-structure-events-and-native-input-focus\n";
+}
+
 void edgeFixture(const fs::path& directory, const std::string& duplicateUrl) {
     fs::create_directories(directory / L"Default");
     auto url = [](const char* id, const char* name, const std::string& value) {
@@ -413,7 +530,7 @@ void edgeFixture(const fs::path& directory, const std::string& duplicateUrl) {
 int wmain(int argc, wchar_t** argv) {
     try {
         expect(argc >= 2, "用法：frog-smoke 应用路径 [截图与诊断目录]");
-        check(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), "COM 初始化失败");
+        check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM 初始化失败");
         ScopeExit uninitialize{[] { CoUninitialize(); }};
         const auto runId = wide(uuid());
         const fs::path temporary = fs::temp_directory_path() / (L"Frog-terminal-smoke-" + runId);
@@ -479,6 +596,12 @@ int wmain(int argc, wchar_t** argv) {
         Terminal terminal(window, log);
         terminal.idle();
         std::cout << "PASS single-instance-terminal-first-paint\n";
+        reviewRegressions(terminal, window, processHandle, dataDirectory, log, seed, first, second);
+        if (argc >= 4 && std::wstring_view(argv[3]) == L"--review-only") {
+            terminal.command(L"q");
+            expect(WaitForSingleObject(processHandle, 7000) == WAIT_OBJECT_0, "审查回归后无法正常退出");
+            std::cout << "PASS review-regressions\n"; return 0;
+        }
 
         terminal.command(L"group root");
         terminal.idle();
@@ -658,7 +781,10 @@ int wmain(int argc, wchar_t** argv) {
         terminal.command(L"group 重命名验收"); terminal.command(L"delete"); terminal.field("delete", "confirm"); key('Y');
         awaitDocument(dataDirectory, [&](const Document& data) { return data.groups.size() == 1; }, "空文件夹删除失败");
         terminal.idle();
-        terminal.command(L"group root"); check(terminal.element(L"排序乙")->SetFocus(), "无法选择拖动源"); terminal.focused(L"排序乙"); type(L"o");
+        terminal.command(L"group root");
+        auto dragSource = terminal.element(L"排序乙");
+        expect(dragSource != nullptr, "无法找到拖动源 排序乙");
+        check(dragSource->SetFocus(), "无法选择拖动源"); terminal.focused(L"排序乙"); type(L"o");
         dragElement(terminal.element(L"排序乙").Get(), terminal.element(L"树展开验收").Get());
         awaitDocument(dataDirectory, [&](const Document& data) { return data.bookmark(second)->groupId == Location(folder); }, "真实鼠标拖动没有迁入文件夹");
         terminal.idle();

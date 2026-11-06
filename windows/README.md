@@ -20,6 +20,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 - 单击整行选中并将键盘焦点交给列表；双击打开书签或切换文件夹。搜索覆盖所有文件夹，点击结果后可以直接编辑、移动、复制。无结果时 Enter 打开输入网址或使用 Google 搜索。
 - 图标为标题首字符加传统色底板，颜色按 ID 与 macOS 使用相同稳定算法生成。没有网站图标下载、缓存、刷新命令或壁纸读取。
 - 增删改、设置、数据操作都在底部命令行完成，没有表单弹窗。修改原子保存成功后才更新界面；失败保留输入并显示原因。中文输入法组合期间不抢占确认、取消和方向键。
+- AltGr（Ctrl+Alt）字符输入交给系统处理，不触发应用内 Ctrl 快捷键。UI Automation 同步节点结构、属性变化与真实焦点；编辑框获得焦点时，选中书签不冒领键盘焦点。
 - 下方显示最近三条日志，`:log` 查看本次运行最近 200 条；底部按键提示随当前输入步骤、选中对象和缓冲区变化。
 
 | 按键 | 行为 |
@@ -71,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 ### 计算器
 
-支持数字、小数、`+ - * /`、小括号、指数形式；中文括号自动转换。Enter 或 `=` 计算，结果按 12 位有效数字输出；错误不进入历史。算式上限 256 字，历史最多 50 条，同一算式只保留最新一条。
+支持数字、小数、`+ - * /`、小括号、指数形式；`× ÷`、全角数字、全角运算符与括号自动转换。Enter 或 `=` 计算，结果按 12 位有效数字输出；错误不进入历史。未知字符保留并报错，超过 256 字的算式拒绝计算，不截成另一条有效算式；历史最多 50 条，同一算式只保留最新一条。
 
 ↑↓ 按显示顺序选择历史并回填，点击历史同样生效；`c` 复制选中历史或当前结果。原生输入支持光标、选区、Ctrl+A 和中文输入法。Esc 关闭保留本次运行的算式和历史，再次 `:calc` 恢复；`:calc clear` 清空。
 
@@ -85,7 +86,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 ## 设置与后台运行
 
-- `:set hotkey on/off/reset/record`：启停、默认或录入全局组合。至少包含 Ctrl、Alt、Win 之一；冲突保留旧配置，错误显示于设置和日志。
+- `:set hotkey on/off/reset/record`：启停、默认或录入全局组合。至少包含 Ctrl、Alt、Win 之一；拒绝占用应用导航、命令及文本编辑组合（如 Ctrl+A/C/V，包含相应 Shift 组合）。加载不再合法的旧组合时回退 `Ctrl+Alt+Space`，保留原启停状态；注册被系统或其他应用占用时保留旧配置，错误显示于设置和日志。
 - `:set corner on/off/left-up/left-down/right-up/right-down`：默认左下角，触角只展开不收起。移开后才能再次触发；启动或重新配置时鼠标已在角落不会误触发。通过鼠标事件驱动，静止不轮询。
 - `:set login on/off/approve`：当前用户启动目录快捷方式；读取真实注册／系统禁用状态，approve 打开 Windows 启动应用设置。登录后通过 `--background` 静默驻留，首次唤起才创建窗口。
 - 完全退出后热键与触角失效。Windows 按本次范围不实现文件夹快跳，也没有对应设置项或 Ctrl+G 拦截。
@@ -114,6 +115,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/measure-perf
 
 `--data-directory` 使用隔离实例，偏好仅在内存，默认不启用全局热键和触角，禁止修改登录启动；不接触正式书签或正式偏好。`--background` 静默启动；`--diagnostics [路径]` 输出 JSONL。旧 `--offline` 图标下载开关随网络图标模块删除，管理功能本来就可离线使用。
 
-应用图标仍仅由共享 `assets/frog-navigation.png` 等比生成。`build/` 和 `dist/` 为忽略的可重建产物；实际通过项与未验证边界见 [VALIDATION.md](VALIDATION.md)。本次重构不自动提交、安装或发布。
+应用图标仍仅由共享 `assets/frog-navigation.png` 等比生成。`build/` 和 `dist/` 为忽略的可重建产物；实际通过项与未验证边界见 [VALIDATION.md](VALIDATION.md)。构建脚本不自动提交、安装或发布；更新正式安装需单独执行 `install.ps1`。
 
 托盘使用独立 `TrayIcon.ico`：同一源图中与画布边缘连通的近白背景转为透明，再完整等比缩放为 16–256 像素资源；保留青蛙内部浅色区域。`generate-icon.ps1` 同时重建应用与托盘资源，应用图标和共享源图不改变。
