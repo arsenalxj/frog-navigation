@@ -2,6 +2,18 @@
 
 内部身份已统一为 Frog。旧身份的原始验收记录归档到项目同级 `frog-navigation-history/20260915-051305/`，不作为本次身份变更的验证结果。
 
+## Edge 收藏夹导入（2026-11-06）
+
+仅 macOS：`:import edge [路径]` 只读扫描 Edge 配置，路径压平、同名组合并、全局 URL 精确去重，通过现有串行存储提交；Windows 未增加入口。
+
+- 边界回归：空配置与有效配置并存、仅含不支持协议、损坏子节点、极大排序值下追加，4 项修复前均失败，修复后通过。命令测试覆盖带空格和中文路径、重复导入不改变数据、任一配置损坏时磁盘与内存保持原样。
+- `swift test`：**166 项通过，0 失败**。
+- Xcode 原生 Release 构建成功，使用 `Frog Local Code Signing`；`codesign --verify --deep --strict` 通过。应用产物为 `build/edge-import-build/Build/Products/Release/青蛙导航.app`，未替换已安装应用。
+- 独立 AppKit 冒烟程序链接当前应用对象，以隔离目录执行真实 `LauncherView` 按键入口、原生输入控件变更通知、命令处理和存储：首次新增 1 条、新建 4 组、跳过重复 2 条及不支持 1 条；再次导入新增 0 条、跳过重复 3 条，源文件字节未变，持久化结果与模型一致。
+- 离屏原生渲染已检查：导入结果、重复导入结果、压平目录展开和设置命令入口；证据为 `build/edge-import-smoke-wgsu6fxr/import-success.png`、`import-repeat.png`、`import-folders.png`、`import-settings.png`。临时冒烟源码及可执行文件已清理。
+- 本机真实 Edge 数据仅在内存中试导入：1 个配置、239 条书签、13 个组，重复导入新增 0 条、跳过重复 239 条；未写入正式青蛙导航数据。
+- 直接启动签名 Release 的独立 PID，使用 `--data-directory` 载入隔离数据成功（`release-startup.log`）。捕获时窗口已收起，未取得 Release 窗口截图。当前进程辅助功能和按键注入权限为未授权，未请求系统权限；不将进程内按键路由与离屏渲染等同于真实窗口物理键鼠验收。测试进程已退出。
+
 ## 计算器（2026-11-05）
 
 `:calc` 计算器缓冲区已按 `designs/frog-echo-tui/SPEC.md` 落地：四则运算与小括号、12 位有效数字、最近 50 条去重历史、按列表顺序的 `↑/↓` 选择、`c` 复制、中文括号归一化；`Esc` 关闭后保留算式与历史，`:calc clear` 清空。

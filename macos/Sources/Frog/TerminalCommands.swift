@@ -16,6 +16,7 @@ extension LauncherModel {
         .init(name: "group", summary: "展开并定位文件夹", usage: ":group 名称", detail: "完整名称或唯一前缀；:group 根目录 折叠全部"),
         .init(name: "backup", summary: "导出 JSON 备份", usage: ":backup [文件路径]", detail: "真实数据快照；支持空格和 ~；不能覆盖当前 bookmarks.json"),
         .init(name: "restore", summary: "从 JSON 整体恢复", usage: ":restore [文件路径]", detail: "Enter 执行校验并整体替换全部书签和文件夹；不合并数据"),
+        .init(name: "import", summary: "从 Edge 导入书签", usage: ":import edge [数据目录]", detail: "只读合并 Edge 收藏；文件夹路径压平，同名组合并，已存在的网址跳过"),
         .init(name: "cd", summary: "切换数据目录", usage: ":cd [目录路径]", detail: "已有 bookmarks.json 直接读取；空目录写入当前数据；旧目录保留"),
         .init(name: "set", summary: "查看或修改本机设置", usage: ":set [login|hotkey|corner|finder|data] [值]", detail: "login on/off/approve · hotkey on/off/reset/record · corner on/off/left-up/left-down/right-up/right-down · finder on/off/authorize/retry · data 路径"),
         .init(name: "retry", summary: "重新读取真实数据文件", usage: ":retry", detail: "修复文件或恢复挂载后重试；读取失败保留已载入数据"),
@@ -84,6 +85,15 @@ extension LauncherModel {
         case "backup", "restore", "cd":
             beginFilePrompt(name, path: argument.isEmpty ? nil : argument)
             if !argument.isEmpty { submitInput() }
+        case "import":
+            let split = argument.firstIndex(where: \.isWhitespace) ?? argument.endIndex
+            let source = argument[..<split].lowercased()
+            let path = String(argument[split...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard source == "edge" else {
+                commandError("用法：:import edge [数据目录]")
+                return
+            }
+            beginEdgeImport(path: path.isEmpty ? nil : path)
         case "calc", "calculator":
             if argument.isEmpty { openCalc() }
             else if argument.lowercased() == "clear" {
@@ -294,6 +304,7 @@ extension LauncherModel {
         rows += [.init(kind: .blank), .init(kind: .section, key: "[operations] · 数据操作"),
                  .init(kind: .action, value: "导出备份 · 另存书签与文件夹 JSON", command: ":backup [文件路径]"),
                  .init(kind: .action, value: "恢复备份 · 替换当前全部书签与文件夹", command: ":restore <备份文件>"),
+                 .init(kind: .action, value: "从 Edge 导入 · 合并收藏夹并跳过重复网址", command: ":import edge"),
                  .init(kind: .blank), .init(kind: .section, key: "[status] · 运行状态"),
                  .init(kind: .value, key: "bookmarks", value: String(document.bookmarks.count)),
                  .init(kind: .value, key: "groups", value: String(document.groups.count)),

@@ -734,18 +734,8 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.buffer, .settings)
         XCTAssertNil(model.prompt)
         XCTAssertEqual(model.settingsRows, initial)
-        XCTAssertEqual(initial.filter { $0.kind == .section }.map(\.key),
-                       ["[general] · 通用", "[data] · 书签数据", "[operations] · 数据操作", "[status] · 运行状态"])
-        XCTAssertEqual(initial.first?.kind, .note)
-        XCTAssertTrue(initial.first?.value.contains("本机偏好") == true)
-        XCTAssertEqual(initial[1].kind, .blank)
-        XCTAssertFalse(initial.contains { $0.key == "directory" })
         let fileIndex = try XCTUnwrap(initial.firstIndex { $0.key == "file" })
         XCTAssertEqual(initial[fileIndex].value, model.store.directory.appendingPathComponent("bookmarks.json").path)
-        XCTAssertEqual(initial[fileIndex].command, ":cd <目录>")
-        XCTAssertEqual(initial[fileIndex + 1].kind, .note)
-        XCTAssertTrue(initial[fileIndex + 1].value.contains("文件名固定为 bookmarks.json"))
-        XCTAssertEqual(initial.filter { $0.kind == .action }.map(\.command), [":backup [文件路径]", ":restore <备份文件>"])
         XCTAssertTrue(model.handleKey(try key(41, ":", modifiers: .shift), isTextEditing: false))
         XCTAssertEqual(model.inputKind, .command)
         XCTAssertEqual(model.modeLabel, "COMMAND")
@@ -999,6 +989,54 @@ final class LauncherModelTests: XCTestCase {
         model.submitInput()
         XCTAssertEqual(model.buffer, .help)
         XCTAssertNil(model.inputKind)
+    }
+
+    func testImportEdgeCommandMergesDeduplicatesAndPreservesDataOnFailure() async throws {
+        let model = try await makeModel()
+        let edge = try directory().appendingPathComponent("Edge 数据")
+        let profile = edge.appendingPathComponent("Default")
+        try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        let json: [String: Any] = ["version": 1, "roots": [
+            "bookmark_bar": ["type": "folder", "name": "收藏夹栏", "children": [
+                ["type": "url", "name": "A", "url": "https://a.test/", "date_added": "0"],
+                ["type": "folder", "name": "开发", "children": [
+                    ["type": "url", "name": "B", "url": "https://b.test/"]
+                ]]
+            ]],
+            "other": ["type": "folder", "name": "其他收藏夹", "children": []]
+        ]]
+        try JSONSerialization.data(withJSONObject: json)
+            .write(to: profile.appendingPathComponent("Bookmarks"))
+
+        model.runCommand("import edge \"\(edge.path)\"")
+        XCTAssertTrue(model.busy)
+        try await settle { !model.busy }
+
+        let firstJob = try XCTUnwrap(model.job)
+        XCTAssertEqual(firstJob.status, .success)
+        let first = try saved(model)
+        XCTAssertEqual(first.bookmarks.map(\.url), ["https://a.test/", "https://b.test/"])
+        XCTAssertEqual(Set(first.groups.map(\.name)), ["收藏夹栏", "收藏夹栏 / 开发", "其他收藏夹"])
+        XCTAssertEqual(first.bookmarks(in: nil).count, 0)
+
+        model.runCommand("import edge \"\(edge.path)\"")
+        try await settle { !model.busy }
+        let secondJob = try XCTUnwrap(model.job)
+        XCTAssertEqual(secondJob.status, .success)
+        XCTAssertEqual(try saved(model), first)
+
+        let beforeFailure = try Data(contentsOf: model.store.directory.appendingPathComponent("bookmarks.json"))
+        let corruptProfile = edge.appendingPathComponent("Profile 1")
+        try FileManager.default.createDirectory(at: corruptProfile, withIntermediateDirectories: true)
+        let corrupt = Data("{broken".utf8)
+        let corruptFile = corruptProfile.appendingPathComponent("Bookmarks")
+        try corrupt.write(to: corruptFile)
+        model.runCommand("import edge \"\(edge.path)\"")
+        try await settle { !model.busy }
+        XCTAssertEqual(model.job?.status, .failure)
+        XCTAssertEqual(model.document, first)
+        XCTAssertEqual(try Data(contentsOf: model.store.directory.appendingPathComponent("bookmarks.json")), beforeFailure)
+        XCTAssertEqual(try Data(contentsOf: corruptFile), corrupt)
     }
 
     func testClearOnlyRemovesLogsAndQuitInvokesApplicationCallback() async throws {

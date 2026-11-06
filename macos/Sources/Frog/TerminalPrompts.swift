@@ -372,6 +372,57 @@ extension LauncherModel {
         }
     }
 
+    func beginEdgeImport(path: String?) {
+        guard prompt == nil, !busy else { return }
+        let root: URL
+        if let path {
+            do { root = try resolvedPath(path) }
+            catch { commandError(error.localizedDescription); return }
+        } else {
+            root = EdgeBookmarks.defaultDataRoot
+        }
+        runEdgeImport(root: root)
+    }
+
+    func runEdgeImport(root: URL) {
+        guard !busy else { return }
+        operationActive = true
+        busy = true
+        buffer = .job
+        bufferOffset = 0
+        job = TerminalJob(title: "import edge", status: .running, lines: [
+            makeEntry(":import edge \(root.path)", .command),
+            makeEntry("只读扫描 Edge 书签…", .info)
+        ])
+        Task { [self] in
+            do {
+                let payload = try await Task.detached(priority: .userInitiated) {
+                    try EdgeBookmarks.load(from: root)
+                }.value
+                var summary = EdgeImportSummary()
+                try await store.apply { summary = try $0.importEdge(payload) }
+                let message = summary.inserted == 0 && summary.groups == 0
+                    ? "没有新增内容：跳过重复 \(summary.duplicates) 条、不支持 \(summary.unsupported) 条。"
+                    : "已导入 \(summary.inserted) 条书签、新建 \(summary.groups) 个文件夹；跳过重复 \(summary.duplicates) 条、不支持 \(summary.unsupported) 条。"
+                query = ""
+                selectedIndex = 0
+                scrollIndex = 0
+                isOrganizing = false
+                rebuildItems()
+                job?.status = .success
+                job?.lines.append(makeEntry(message, .success))
+                appendLog(message, .success)
+            } catch {
+                job?.status = .failure
+                job?.lines.append(makeEntry(error.localizedDescription, .error))
+                appendLog(error.localizedDescription, .error)
+            }
+            operationActive = false
+            busy = store.isBusy
+            rebuildSettings()
+        }
+    }
+
     func runFileOperation(_ command: String, path: URL) {
         guard !busy else { return }
         operationActive = true

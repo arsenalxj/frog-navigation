@@ -182,7 +182,7 @@ extension LauncherView {
     private func drawJob() {
         typealias D = TerminalDrawing
         guard let job = model.job else {
-            D.text("尚无任务输出。使用 :backup 或 :restore 执行数据操作。", 72, 84, size: 12, color: D.muted)
+            D.text("尚无任务输出。使用 :backup、:restore 或 :import edge 执行数据操作。", 72, 84, size: 12, color: D.muted)
             return
         }
         D.text("TASK", 72, 84, size: 11, color: D.muted)
