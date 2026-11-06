@@ -397,6 +397,37 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertNil(model.prompt)
     }
 
+    func testHideClearsSearchInputAndRestoresUnfilteredList() async throws {
+        let document = fixture(count: 3)
+        let model = try await makeModel(document)
+        model.startSearch()
+        model.updateInput("书签 1")
+        XCTAssertEqual(model.items.map(\.id), [document.bookmarks[1].id])
+        model.didHide()
+        XCTAssertEqual(model.query, "")
+        XCTAssertEqual(model.inputText, "")
+        XCTAssertNil(model.inputKind)
+        XCTAssertEqual(model.items.map(\.id), document.bookmarks.map(\.id))
+        XCTAssertEqual(model.selectedIndex, 0)
+        XCTAssertEqual(model.scrollIndex, 0)
+        model.startSearch()
+        XCTAssertEqual(model.inputText, "")
+    }
+
+    func testHideClearsSearchFilterWithoutDiscardingCommandInput() async throws {
+        let document = fixture(count: 3)
+        let model = try await makeModel(document)
+        model.startSearch()
+        model.updateInput("书签 1")
+        model.startCommand()
+        model.updateInput("find other")
+        model.didHide()
+        XCTAssertEqual(model.query, "")
+        XCTAssertEqual(model.items.map(\.id), document.bookmarks.map(\.id))
+        XCTAssertEqual(model.inputKind, .command)
+        XCTAssertEqual(model.inputText, "find other")
+    }
+
     func testHidePreservesInputAndRevisionWithoutDiscardingPrompt() async throws {
         let model = try await makeModel()
         model.visible = true

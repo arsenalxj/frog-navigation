@@ -230,7 +230,21 @@ final class LauncherModel: ObservableObject {
         if selectedIndex >= scrollIndex + visibleRowCount { scrollIndex = selectedIndex - visibleRowCount + 1 }
     }
 
-    func didHide() { visible = false; presented = false }
+    func didHide() {
+        visible = false
+        presented = false
+        let wasSearching = inputKind == .search
+        guard wasSearching || !query.isEmpty else { return }
+        query = ""
+        if wasSearching {
+            inputKind = nil
+            inputText = ""
+            inputRevision &+= 1
+        }
+        selectedIndex = 0
+        scrollIndex = 0
+        rebuildItems(selecting: "__reset__")
+    }
 
     func setInput(_ kind: TerminalInputKind, text: String) {
         inputKind = kind
