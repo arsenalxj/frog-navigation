@@ -13,6 +13,7 @@ extension LauncherView {
         case .log: hint = ":clear 清空 · Esc 返回"
         case .job: hint = "Esc 返回 · :log 查看日志"
         case .calc: hint = "\(model.calcHistory.count) 条历史 · Esc 关闭"
+        case .commands: hint = "\(model.customCommands.count) 条命令 · macOS · \(model.customScreenTitle) · Esc 返回"
         }
         D.text(hint, 1400, 36, size: 10.5, color: D.muted, align: .right)
         D.rule(40, 50, 1360)
@@ -22,6 +23,7 @@ extension LauncherView {
         case .log: drawLog()
         case .job: drawJob()
         case .calc: drawCalc()
+        case .commands: drawCustomCommands()
         }
     }
 

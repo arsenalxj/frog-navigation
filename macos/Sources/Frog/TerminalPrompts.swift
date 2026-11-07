@@ -17,6 +17,10 @@ extension LauncherModel {
         completionGeneration &+= 1
         completionTask?.cancel()
         completionTask = nil
+        customDirectoryLoading = false
+        customDirectoryBrowsing = false
+        customDirectoryBrowseOrigin = ""
+        customDirectoryPreselectPath = nil
         prompt = nil
         inputKind = nil
         draft = Draft()
@@ -353,18 +357,26 @@ extension LauncherModel {
     nonisolated static func pathChoices(text: String, command: String, base: URL) -> [TerminalChoice] {
         let expanded = (text as NSString).expandingTildeInPath
         let absolute = (expanded as NSString).isAbsolutePath ? expanded : base.appendingPathComponent(expanded).path
-        let full = URL(fileURLWithPath: absolute)
+        let typed = URL(fileURLWithPath: absolute)
+        let rawName = (text as NSString).lastPathComponent
+        let full = typed.standardizedFileURL
         let trailingSlash = text.hasSuffix("/") || text.isEmpty
-        let parent = trailingSlash ? full : full.deletingLastPathComponent()
-        let prefix = trailingSlash ? "" : full.lastPathComponent
+        // 单独输入的 . / .. 表示“列出该目录”，不能在标准化后当作名字前缀。
+        let listsTypedDirectory = trailingSlash || rawName == "." || rawName == ".."
+        let parent = listsTypedDirectory ? full : full.deletingLastPathComponent()
+        let prefix = listsTypedDirectory ? "" : full.lastPathComponent
+        let customDirectory = command == "commands-directory"
+        let foldedPrefix = prefix.lowercased()
         guard let urls = try? FileManager.default.contentsOfDirectory(at: parent,
-                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey], options: [.skipsHiddenFiles]) else { return [] }
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey], options: prefix.hasPrefix(".") ? [] : [.skipsHiddenFiles]) else { return [] }
         return urls.compactMap { url -> TerminalChoice? in
-            guard prefix.isEmpty || url.lastPathComponent.localizedCaseInsensitiveContains(prefix),
+            let matches = customDirectory ? url.lastPathComponent.lowercased().hasPrefix(foldedPrefix)
+                : url.lastPathComponent.localizedCaseInsensitiveContains(prefix)
+            guard prefix.isEmpty || matches,
                   let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]) else { return nil }
             let isDirectory = values.isDirectory == true
-            guard isDirectory || (command != "cd" && values.isRegularFile == true && url.pathExtension.lowercased() == "json") else { return nil }
-            let value = url.path + (isDirectory ? "/" : "")
+            guard isDirectory || (!["cd", "commands-directory"].contains(command) && values.isRegularFile == true && url.pathExtension.lowercased() == "json") else { return nil }
+            let value = url.standardizedFileURL.path + (isDirectory ? "/" : "")
             return TerminalChoice(id: value, label: value, detail: isDirectory ? "directory" : "JSON")
         }.sorted { lhs, rhs in
             if lhs.detail != rhs.detail { return lhs.detail == "directory" }

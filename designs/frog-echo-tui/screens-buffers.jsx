@@ -97,6 +97,7 @@ function bvSettings(ctx) {
   line("[operations] · 数据操作", { color: COLOR.green });
   line("导出备份 · 另存书签与文件夹 JSON", { hint: ":backup [文件路径]" });
   line("恢复备份 · 替换当前全部书签与文件夹", { hint: ":restore <备份文件>" });
+  line("自定义命令 · 终端 / 程序 / 网址（macOS）", { hint: ":commands" });
   line("");
   line("[status] · 运行状态", { color: COLOR.green });
   kv("bookmarks", String(s.doc.bookmarks.length), "", COLOR.ink);
@@ -131,7 +132,7 @@ function bvHelp(ctx) {
       <T x={descX} y={BV.bodyTop} size={12} fill={COLOR.ink}>青蛙导航 — 本地书签启动台。所有操作在命令行完成。</T>
 
       <T x={X} y={BV.bodyTop + 30} size={12} weight={700} fill={COLOR.green}>SYNOPSIS</T>
-      <T x={descX} y={BV.bodyTop + 30} size={12} fill={COLOR.ink}>frog [command] · j/k 选择 · : 命令 · / 搜索</T>
+      <T x={descX} y={BV.bodyTop + 30} size={12} fill={COLOR.ink}>frog [command] · :commands 管理自定义命令 · :help 帮助 · / 搜索</T>
 
       <T x={X} y={BV.bodyTop + 64} size={12} weight={700} fill={COLOR.green}>COMMANDS</T>
       {ctx.commands.map(([name, desc, usage, note], i) => {

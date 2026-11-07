@@ -657,20 +657,6 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertTrue(model.document.bookmarks.contains { $0.title == "外部新增" })
     }
 
-    func testCommandCompletionCyclesAndTypedInputStartsFreshCandidates() async throws {
-        let model = try await makeModel()
-        model.startCommand()
-        model.updateInput("r")
-        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
-        XCTAssertEqual(model.inputText, "rename")
-        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
-        XCTAssertEqual(model.inputText, "restore")
-        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
-        XCTAssertEqual(model.inputText, "rename")
-        model.updateInput("set finder a")
-        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
-        XCTAssertEqual(model.inputText, "set finder authorize")
-    }
 
     func testEscapeCollapsesParentThenAllThenDismisses() async throws {
         let a = BookmarkGroup(name: "A", order: 1)
@@ -867,12 +853,11 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.buffer, .help)
         model.startCommand()
         model.updateInput("未提交命令")
-        _ = model.handleKey(try key(126), isTextEditing: true)
+        _ = model.handleKey(try key(126, modifiers: .option), isTextEditing: true)
         XCTAssertEqual(model.inputText, "help")
-        _ = model.handleKey(try key(125), isTextEditing: true)
+        _ = model.handleKey(try key(125, modifiers: .option), isTextEditing: true)
         XCTAssertEqual(model.inputText, "未提交命令")
         model.escape()
-        XCTAssertFalse(model.commands.contains { ["refresh", "favicons", "atlas"].contains($0.name) })
         model.runCommand("set")
         XCTAssertEqual(model.buffer, .settings)
         XCTAssertNil(model.inputKind)

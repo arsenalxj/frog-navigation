@@ -13,6 +13,7 @@ extension LauncherModel {
         .init(name: "copy", summary: "复制所选书签网址", usage: ":copy", detail: "写入系统剪贴板"),
         .init(name: "find", summary: "搜索标题和网址", usage: ":find [关键词]", detail: "上下选择；无结果 Enter 打开网址或 Google 搜索"),
         .init(name: "calc", summary: "打开计算器", usage: ":calc [clear]", detail: "支持 + - * / 与括号；历史保留，c 复制结果"),
+        .init(name: "commands", summary: "管理自定义命令", usage: ":commands", detail: "终端 / 程序 / 网址；a 新建、e 编辑、Enter 运行"),
         .init(name: "group", summary: "展开并定位文件夹", usage: ":group 名称", detail: "完整名称或唯一前缀；:group 根目录 折叠全部"),
         .init(name: "backup", summary: "导出 JSON 备份", usage: ":backup [文件路径]", detail: "真实数据快照；支持空格和 ~；不能覆盖当前 bookmarks.json"),
         .init(name: "restore", summary: "从 JSON 整体恢复", usage: ":restore [文件路径]", detail: "Enter 执行校验并整体替换全部书签和文件夹；不合并数据"),
@@ -102,23 +103,29 @@ extension LauncherModel {
                 appendLog("计算器已清空", .success)
             } else { commandError("用法：:calc 打开计算器，:calc clear 清空。") }
         case "set": runSetting(argument)
+        case "commands":
+            guard argument.isEmpty else { commandError("用法：:commands 打开自定义命令管理。"); return }
+            openCustomCommands()
         case "help": openBuffer(.help)
         case "log": openBuffer(.log)
         case "clear":
             logs = []
             if buffer == .log { bufferOffset = 0 }
             rebuildSettings()
-        case "retry": retryStorage()
+        case "retry": retryStorage(); loadCustomCommands()
         case "q":
             if let terminateApplication { terminateApplication() }
             else { NSApp?.terminate(nil) }
-        default: commandError("未知命令 “\(name)” · 输入 :help 查看命令。")
+        default:
+            if let command = customCommands.first(where: { $0.name == name }) { executeCustomCommand(command, input: argument) }
+            else { commandError("未知命令 “\(name)” · 输入 :help 查看命令，:commands 管理自定义命令。"); }
         }
     }
 
     func commandError(_ message: String) {
         appendLog(message, .error)
         if buffer == .calc, prompt == nil { setCalcFeedback("✗ " + message, .error) }
+        if buffer == .commands { customFeedback = message }
     }
 
     func runSetting(_ argument: String) {
@@ -210,7 +217,24 @@ extension LauncherModel {
         }
     }
 
+    var commandCandidates: [TerminalCommand] {
+        guard inputKind == .command, !inputText.contains(where: \.isWhitespace) else { return [] }
+        let query = inputText.lowercased()
+        return commands.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(query) }
+    }
+
+    func moveCommandCandidate(_ direction: Int) {
+        guard !commandCandidates.isEmpty else { return }
+        commandCandidateIndex = min(max(0, (commandCandidateIndex ?? -1) + direction), commandCandidates.count - 1)
+    }
+
     func completeCommand(backward: Bool) {
+        if let index = commandCandidateIndex, commandCandidates.indices.contains(index) {
+            let name = commandCandidates[index].name
+            commandCandidateIndex = nil
+            setInput(.command, text: name)
+            return
+        }
         let candidates: [String]
         if lastCompletedCommand != inputText { commandCompletionPrefix = inputText }
         let prefix = commandCompletionPrefix ?? inputText
@@ -220,7 +244,7 @@ extension LauncherModel {
                             "set corner left-down", "set corner right-up", "set corner right-down", "set finder on",
                             "set finder off", "set finder authorize", "set finder retry", "set data "]
             candidates = settings.filter { $0.hasPrefix(prefix) }
-        } else { candidates = commands.map(\.name).filter { $0.hasPrefix(prefix) } }
+        } else { candidates = commands.filter { $0.name.localizedCaseInsensitiveContains(prefix) || $0.summary.localizedCaseInsensitiveContains(prefix) }.map(\.name) }
         guard !candidates.isEmpty else { return }
         let index: Int
         if let lastCompletedCommand, let previous = candidates.firstIndex(of: lastCompletedCommand) {
@@ -305,6 +329,7 @@ extension LauncherModel {
                  .init(kind: .action, value: "导出备份 · 另存书签与文件夹 JSON", command: ":backup [文件路径]"),
                  .init(kind: .action, value: "恢复备份 · 替换当前全部书签与文件夹", command: ":restore <备份文件>"),
                  .init(kind: .action, value: "从 Edge 导入 · 合并收藏夹并跳过重复网址", command: ":import edge"),
+                 .init(kind: .action, value: "自定义命令 · 终端 / 程序 / 网址", command: ":commands"),
                  .init(kind: .blank), .init(kind: .section, key: "[status] · 运行状态"),
                  .init(kind: .value, key: "bookmarks", value: String(document.bookmarks.count)),
                  .init(kind: .value, key: "groups", value: String(document.groups.count)),

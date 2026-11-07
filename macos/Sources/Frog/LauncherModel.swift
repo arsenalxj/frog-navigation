@@ -36,7 +36,39 @@ final class LauncherModel: ObservableObject {
     @Published var calcError: String?
     @Published var calcFeedback: String?
     @Published var calcFeedbackLevel: TerminalLevel = .success
-    let commands = LauncherModel.commandDirectory
+    @Published var customCommands: [CustomCommand] = []
+    @Published var customLoaded = false
+    @Published var customIssue: String?
+    @Published var customFeedback: String?
+    @Published var customScreen: CustomCommandScreen = .list
+    @Published var customIndex = 0
+    @Published var customQuery = ""
+    @Published var customDraft: CustomCommand?
+    @Published var customFieldIndex = 0
+    @Published var customSaving = false
+    @Published var customExecuting = false
+    @Published var installedCustomTerminals: [CustomCommandTerminal] = []
+    @Published var customDirectoryLoading = false
+    @Published var customDirectoryBrowsing = false
+    var customDirectoryBase = FileManager.default.homeDirectoryForCurrentUser
+    var customDirectoryBrowseOrigin = ""
+    var customDirectoryPreselectPath: String?
+    @Published var customExecutionCommand: CustomCommand?
+    @Published var customExecutionInput = ""
+    @Published var customExecutionSummary = ""
+    @Published var customExecutionOutput: [String] = []
+    @Published var customExecutionFailed = false
+    @Published var commandCandidateIndex: Int?
+    let customStore: CustomCommandStore
+    let customExecutor = CustomCommandExecutor()
+    var customLoadTask: Task<Void, Never>?
+    var customOriginalName: String?
+    var commands: [TerminalCommand] {
+        Self.commandDirectory + customCommands.map {
+            TerminalCommand(name: $0.name, summary: $0.title, usage: ":" + $0.name,
+                            detail: $0.type.label + " · " + ($0.type == .url ? $0.target : $0.directory))
+        }
+    }
 
     var dismissWindow: (() -> Void)?
     var terminateApplication: (() -> Void)?
@@ -96,6 +128,7 @@ final class LauncherModel: ObservableObject {
          defaults: UserDefaults? = nil) {
         self.store = store
         self.isolated = isolated
+        self.customStore = CustomCommandStore(directory: isolated ? store.directory : BookmarkStore.defaultDirectory)
         self.login = LoginItemController(isolated: isolated)
         self.hotKey = hotKey
         self.hotCorner = hotCorner
@@ -129,6 +162,7 @@ final class LauncherModel: ObservableObject {
             self?.rebuildSettings()
         }.store(in: &subscriptions)
         storageChanged()
+        loadCustomCommands()
     }
 
     func storageChanged() {
@@ -246,6 +280,12 @@ final class LauncherModel: ObservableObject {
         rebuildItems(selecting: "__reset__")
     }
 
+    var isCommandsEditing: Bool {
+        guard buffer == .commands else { return false }
+        guard let command = prompt?.command else { return true }
+        return command.hasPrefix("commands-")
+    }
+
     func setInput(_ kind: TerminalInputKind, text: String) {
         inputKind = kind
         inputText = text
@@ -254,6 +294,25 @@ final class LauncherModel: ObservableObject {
 
     func updateInput(_ value: String) {
         guard isTextInputActive, !operationActive else { return }
+        if buffer == .commands, inputKind == .search {
+            inputText = value
+            customQuery = value
+            customIndex = 0
+            bufferOffset = 0
+            return
+        }
+        if buffer == .commands, prompt?.command == "commands-edit" {
+            inputText = value
+            prompt?.error = nil
+            customFeedback = nil
+            if customDirectoryBrowsing {
+                customDirectoryBrowsing = false
+                prompt?.hint = customDirectoryHint
+            }
+            captureCustomDraft()
+            if customField == .directory { refreshCustomDirectoryChoices() }
+            return
+        }
         if inputKind == .calc {
             let filtered = TerminalCalculator.filtered(value)
             inputText = filtered
@@ -275,6 +334,7 @@ final class LauncherModel: ObservableObject {
             refreshPromptChoices(filter: true)
         } else {
             historyIndex = nil
+            commandCandidateIndex = nil
             commandCompletionPrefix = nil
             lastCompletedCommand = nil
         }
@@ -283,6 +343,7 @@ final class LauncherModel: ObservableObject {
     func startCommand() {
         guard prompt == nil, !busy else { return }
         historyIndex = nil
+        commandCandidateIndex = nil
         historyDraft = ""
         commandCompletionPrefix = nil
         lastCompletedCommand = nil
@@ -309,6 +370,7 @@ final class LauncherModel: ObservableObject {
     func openBuffer(_ buffer: TerminalBuffer) {
         guard prompt == nil, !busy else { return }
         if buffer == .calc { openCalc(); return }
+        if buffer == .commands { openCustomCommands(); return }
         self.buffer = buffer
         bufferOffset = 0
         inputKind = nil
@@ -346,6 +408,7 @@ final class LauncherModel: ObservableObject {
             case .log: count = logs.count
             case .job: count = job?.lines.count ?? 0
             case .calc: count = calcHistory.count
+            case .commands: count = customScreen == .execution ? customExecutionRows.count : filteredCustomCommands.count
             }
             let capacity: Int
             switch buffer {
@@ -354,8 +417,12 @@ final class LauncherModel: ObservableObject {
             case .log: capacity = 32
             case .job: capacity = 25
             case .calc: capacity = Self.calcVisibleRows
+            case .commands: capacity = Self.calcVisibleRows
             }
             bufferOffset = min(max(0, bufferOffset + rows), max(0, count - capacity))
+            if buffer == .commands, customScreen == .list, count > 0 {
+                customIndex = min(max(customIndex, bufferOffset), min(count - 1, bufferOffset + capacity - 1))
+            }
         } else {
             scrollIndex = min(max(0, scrollIndex + rows), max(0, items.count - visibleRowCount))
             selectedIndex = min(max(selectedIndex, scrollIndex), min(max(0, items.count - 1), scrollIndex + visibleRowCount - 1))
@@ -364,6 +431,7 @@ final class LauncherModel: ObservableObject {
 
     func escape() {
         guard !operationActive else { return }
+        if isCommandsEditing { escapeCustomCommands(); return }
         if prompt != nil {
             if prompt?.command == "hotkey" { hotKey?.cancelRecording() }
             finishPrompt()
@@ -399,6 +467,12 @@ final class LauncherModel: ObservableObject {
 
     func submitInput() {
         guard !busy else { return }
+        if isCommandsEditing, inputKind != .command {
+            if customScreen == .edit { saveCustomDraft() }
+            else if customScreen == .delete { escapeCustomCommands() }
+            else if inputKind == .search { inputKind = nil }
+            return
+        }
         if let prompt {
             if !prompt.acceptsText {
                 if prompt.command != "hotkey" { finishPrompt() }
@@ -406,7 +480,8 @@ final class LauncherModel: ObservableObject {
         } else if inputKind == .calc {
             submitCalc()
         } else if inputKind == .command {
-            let command = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let command = commandCandidateIndex.flatMap { commandCandidates.indices.contains($0) ? commandCandidates[$0].name : nil }
+                ?? inputText.trimmingCharacters(in: .whitespacesAndNewlines)
             inputKind = nil
             if !command.isEmpty {
                 history.append(command)
@@ -559,6 +634,12 @@ final class LauncherModel: ObservableObject {
         guard event.type == .keyDown else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         let text = event.charactersIgnoringModifiers ?? ""
+        if isCommandsEditing, inputKind != .command { return handleCustomCommandKey(event, isTextEditing: isTextEditing) }
+        if inputKind == .command, modifiers == .option, [125, 126].contains(event.keyCode) {
+            commandCandidateIndex = nil
+            recallHistory(event.keyCode == 126 ? -1 : 1)
+            return true
+        }
         if modifiers.contains(.command) {
             if modifiers == .command, text == "," { openSettings(); return true }
             if modifiers == .command, text.lowercased() == "n" { addBookmark(); return true }
@@ -594,7 +675,9 @@ final class LauncherModel: ObservableObject {
             switch event.keyCode {
             case 36, 76: submitInput(); return true
             case 48: completeCommand(backward: modifiers.contains(.shift)); return true
-            case 125, 126: recallHistory(event.keyCode == 126 ? -1 : 1); return true
+            case 125, 126:
+                moveCommandCandidate(event.keyCode == 126 ? -1 : 1)
+                return true
             default: return false
             }
         }
@@ -614,7 +697,7 @@ final class LauncherModel: ObservableObject {
         }
         if text == ":" { startCommand(); return true }
         if buffer == .settings { return true }
-        if let buffer {
+        if buffer != nil {
             if text == "/" { self.buffer = nil; bufferOffset = 0; startSearch(); return true }
             if text == "?" { openBuffer(.help); return true }
             switch event.keyCode {

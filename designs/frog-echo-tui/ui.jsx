@@ -129,7 +129,7 @@ function CommandChrome({ s, act }) {
     promptColor = input.kind === "search" ? COLOR.teal : COLOR.amber;
     value = input.value;
     right = {
-      text: input.kind === "search" ? "Enter 打开 · Esc 清空" : "Tab 补全 · ↑↓ 历史 · Esc 取消",
+      text: input.kind === "search" ? (s.buffer === "commands" ? "Enter 确认筛选 · Esc 结束输入" : "Enter 打开 · Esc 清空") : "Tab 补全 · ↑↓ 选择 · ⌥↑↓ 历史 · Esc 取消",
       kind: "info",
     };
   } else if (s.buffer === "calc") {
@@ -142,7 +142,7 @@ function CommandChrome({ s, act }) {
       : { text: "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭", kind: "info" };
   }
   const placeholder = !p && !input && s.buffer !== "calc"
-    ? s.buffer === "settings" ? ": 输入命令 · :help 查看帮助" : ": 打开命令 · / 搜索 · ? 帮助"
+    ? s.buffer === "settings" ? ": 输入命令 · :help 查看帮助" : s.buffer === "commands" ? ": 输入命令 · Esc 返回" : ": 打开命令 · / 搜索 · ? 帮助"
     : null;
   const inputX = x + LAYOUT.margin + 18 + (label ? textW(label, 13) + 12 : 0);
   const calcMode = !p && !input && s.buffer === "calc";
@@ -199,7 +199,7 @@ function StatusChrome({ s, ctx }) {
     <g>
       <R x={x} y={y} w={w} h={h} fill={COLOR.forest} />
       <T x={x + LAYOUT.margin} y={y + 19.5} size={12.5} weight={700} fill={COLOR.yellow} spacing={1.2}>{mode}</T>
-      {s.buffer !== "settings" && s.buffer !== "calc" && (
+      {!["settings", "calc", "commands"].includes(s.buffer) && (
         <T x={x + LAYOUT.margin - 16 + modeW} y={y + 19.5} size={12.5} fill={COLOR.paper} opacity={0.82}>
           · {s.query ? `“${s.query}”` : ctx.folderName} · {pos}
         </T>
@@ -207,6 +207,7 @@ function StatusChrome({ s, ctx }) {
       <T x={x + w - LAYOUT.margin} y={y + 19.5} size={12} anchor="end" fill={COLOR.mint} opacity={0.9}>
         {s.buffer === "settings" ? ":set <key> <value> · :help 帮助 · Esc 返回"
           : s.buffer === "calc" ? ": 命令 · Esc 关闭并保留算式"
+          : s.buffer === "commands" ? s.statusHint || (s.input ? "Esc 取消输入" : ": 命令 · Esc 返回")
           : ": 命令 · F1 地图 · ? 帮助"}
       </T>
     </g>
@@ -325,39 +326,17 @@ function LogPane({ s, act }) {
     );
   }
 
-  const promptOptions = null;
-  const cmdPrefix = s.input && s.input.kind === "command" && !/\s/.test(s.input.value)
-    ? s.input.value.trim().toLowerCase() : null;
-  const cmdOptions = cmdPrefix != null
-    ? COMMANDS.filter(([n]) => n.startsWith(cmdPrefix)).slice(0, 3).map(([n, d, usage]) => ({ id: n, label: ":" + n, hint: d, usage }))
-    : null;
-  const options = promptOptions && promptOptions.length ? promptOptions : cmdOptions;
-  const showOptions = options && options.length > 0;
-  const isCommandComplete = !promptOptions && cmdOptions;
   const lines = (s.log || []).slice(-3);
   return (
     <g>
       <L x1={x} y1={y} x2={x + w} y2={y} stroke={COLOR.line} />
       <T x={x} y={y + 15} size={10.5} fill={COLOR.muted} spacing={1.6}>
-        {showOptions ? (isCommandComplete ? "COMMANDS · Tab 补全 · ↑↓ 历史" : "COMPLETE · Tab 循环 · ↑↓ 选择 · Enter 确认") : "OUTPUT"}
+        OUTPUT
       </T>
       <T x={x + w} y={y + 15} size={10.5} anchor="end" fill={COLOR.muted}>
-        {showOptions ? (isCommandComplete ? options.length + " 项" : `${s.prompt.optIndex + 1}/${options.length}`) : ":log 查看全部"}
+        :log 查看全部
       </T>
-      {showOptions ? (
-        options.slice(0, 3).map((opt, i) => {
-          const sel = !isCommandComplete && i === (s.prompt.optIndex % Math.max(1, options.length));
-          const oy = y + 34 + i * 16;
-          return (
-            <g key={opt.id + i}>
-              {sel && <R x={x} y={oy - 8} w={w} h={16} fill={COLOR.ink} />}
-              <T x={x + 8} y={oy} size={11.5} fill={sel ? COLOR.yellow : COLOR.muted}>{String(i + 1).padStart(2, "0")}</T>
-              <T x={x + 34} y={oy} size={12.5} fill={sel ? COLOR.paper : COLOR.ink}>{opt.label}</T>
-              {opt.hint && <T x={x + w - 8} y={oy} size={11} anchor="end" fill={sel ? COLOR.mint : COLOR.muted}>{opt.hint}</T>}
-            </g>
-          );
-        })
-      ) : lines.length ? (
+      {lines.length ? (
         lines.map((l, i) => (
           <g key={l.seq || i}>
             <T x={x} y={y + 34 + i * 16} size={11.5} fill={COLOR.muted}>{l.time}</T>

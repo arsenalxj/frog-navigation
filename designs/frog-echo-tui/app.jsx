@@ -44,6 +44,7 @@ const FROG_SCENES = [
   ]},
   { group: "缓冲区", items: [
     ["buffer-settings", "设置缓冲区"],
+    ["buffer-commands", "自定义命令 · macOS"],
     ["buffer-settings-login-approval", "登录项待批准"],
     ["buffer-settings-login-error", "登录项设置失败"],
     ["buffer-settings-hotkey-conflict", "快捷键冲突"],
@@ -199,6 +200,15 @@ const SHORTCUTS = [
 
 function App() {
   const [s, setS] = useState(baseState);
+  const [custom, setCustom] = useState(frogLoadCommands);
+  const [customPreview, setCustomPreview] = useState(null);
+  const previewSeq = useRef(0);
+  const saveCustom = (items) => {
+    try { localStorage.setItem(FROG_COMMAND_STORAGE, JSON.stringify(items)); }
+    catch { return "保存失败：浏览器存储不可用，草稿仍保留。"; }
+    setCustom({ items, error: "" });
+    return "";
+  };
   const imeRef = useRef(null);
   const composingRef = useRef(false);
   const calcCaretRef = useRef(null);
@@ -254,7 +264,7 @@ function App() {
       if (p.input) {
         return {
           ...p,
-          input: { ...p.input, value },
+          input: { ...p.input, value, choice: -1 },
           query: p.input.kind === "search" ? value : p.query,
           cursor: p.input.kind === "search" ? 0 : p.cursor,
           scroll: p.input.kind === "search" ? 0 : p.scroll,
@@ -893,6 +903,13 @@ function App() {
     const arg = rest.join(" ");
     const finish = (text, kind) => pushLog(text, kind);
 
+    if (name === "commands") { setCustomPreview(null); openBuffer("commands"); return; }
+    const customCommand = custom.items.find(c => c.name.toLowerCase() === name);
+    if (customCommand) {
+      setCustomPreview({ command: customCommand, args: cmd.slice(nameRaw.length).trim(), seq: ++previewSeq.current });
+      openBuffer("commands");
+      return;
+    }
     if (name === "add" || name === "a") { startAdd(); return; }
     if (name === "edit" || name === "e") { startEdit(arg === "url" ? "url" : "title"); return; }
     if (name === "rename" || name === "r") { startRename(); return; }
@@ -1092,7 +1109,8 @@ function App() {
     if (s.prompt) { submitPrompt(); return; }
     if (!s.input) return;
     if (s.input.kind === "command") {
-      const cmd = s.input.value.trim();
+      const matches = frogCommandMatches(custom.items, s.input.value);
+      const cmd = s.input.choice >= 0 && matches[s.input.choice] ? matches[s.input.choice][0] : s.input.value.trim();
       setS((p) => ({ ...p, input: null, histIndex: -1, history: cmd ? [...p.history, cmd].slice(-50) : p.history }));
       runCommand(cmd);
       return;
@@ -1115,6 +1133,7 @@ function App() {
     let next = { ...st, sceneId: id };
     switch (id) {
       case "main-root": break;
+      case "buffer-commands": setCustomPreview(null); next = { ...next, buffer: "commands" }; break;
       case "main-folder": next = { ...next, folderId: "g-dev", cursor: 1 }; break;
       case "search": next = { ...next, query: "git", cursor: 0 }; break;
       case "search-focus": next = { ...next, query: "git", input: { kind: "search", value: "git" } }; break;
@@ -1219,6 +1238,7 @@ function App() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.isComposing) return;
+      if (s.buffer === "commands" && !s.input && !s.prompt) return;
       const k = e.key;
       const mod = e.metaKey || e.ctrlKey || e.altKey;
 
@@ -1351,21 +1371,26 @@ function App() {
         if (k === "Tab") {
           e.preventDefault();
           if (s.input.kind === "command") {
-            const val = s.input.value.trim().toLowerCase();
-            const hit = COMMANDS.find(([name]) => name.startsWith(val));
-            if (hit) setS((p) => ({ ...p, input: { ...p.input, value: hit[0] } }));
+            const matches = frogCommandMatches(custom.items, s.input.value);
+            const hit = matches[s.input.choice >= 0 ? s.input.choice : 0];
+            if (hit) setS((p) => ({ ...p, input: { ...p.input, value: hit[0], choice: -1 } }));
           }
           return;
         }
         if ((k === "ArrowUp" || k === "ArrowDown") && s.input.kind === "command") {
           e.preventDefault();
-          setS((p) => {
-            const hist = p.history;
-            if (!hist.length) return p;
-            const cur = p.histIndex < 0 ? hist.length : p.histIndex;
-            const next = k === "ArrowUp" ? Math.max(0, cur - 1) : Math.min(hist.length, cur + 1);
-            return { ...p, histIndex: next, input: { ...p.input, value: hist[next] || "" } };
-          });
+          const matches = frogCommandMatches(custom.items, s.input.value);
+          if (matches.length && !e.altKey) {
+            setS(p => ({ ...p, input: { ...p.input, choice: Math.max(0, Math.min(matches.length - 1, (p.input.choice ?? -1) + (k === "ArrowDown" ? 1 : -1))) } }));
+          } else {
+            setS((p) => {
+              const hist = p.history;
+              if (!hist.length) return p;
+              const cur = p.histIndex < 0 ? hist.length : p.histIndex;
+              const next = k === "ArrowUp" ? Math.max(0, cur - 1) : Math.min(hist.length, cur + 1);
+              return { ...p, histIndex: next, input: { ...p.input, value: hist[next] || "", choice: -1 } };
+            });
+          }
           return;
         }
         return;
@@ -1464,12 +1489,17 @@ function App() {
         <R x={0} y={0} w={LAYOUT.W} h={LAYOUT.H} fill={COLOR.paper} />
 
         {showFilepanel && buffers && <g>{buffers.renderFilePanel(ctx)}</g>}
-        {!showFilepanel && s.buffer && buffers && <g>{buffers.renderBuffer(ctx)}</g>}
+        {!showFilepanel && s.buffer && s.buffer !== "commands" && buffers && <g>{buffers.renderBuffer(ctx)}</g>}
         {!showFilepanel && !s.buffer && <g>{main}<LogPane s={s} act={act} /></g>}
 
-        {!showFilepanel && <CommandChrome s={s} act={act} />}
-        <StatusChrome s={s} ctx={ctx} />
-        {s.buffer !== "settings" && s.buffer !== "calc" && <HintsChrome />}
+        {!showFilepanel && (s.buffer !== "commands" || s.input || s.prompt) && <CommandChrome s={s} act={act} />}
+        {(s.buffer !== "commands" || s.input || s.prompt) && <StatusChrome s={s} ctx={ctx} />}
+        {!["settings", "calc", "commands"].includes(s.buffer) && <HintsChrome />}
+        {!showFilepanel && s.buffer === "commands" && <FrogCommands key={customPreview ? JSON.stringify(customPreview) : "manage"}
+          items={custom.items} saveItems={saveCustom} initialPreview={customPreview} suspended={!!s.input || !!s.prompt}
+          close={closeBuffer} startCommand={startCommand} storageError={custom.error} />}
+        {!showFilepanel && s.input?.kind === "command" && <FrogCommandDiscovery items={custom.items} input={s.input}
+          choose={name => { setS(p => ({ ...p, input: { ...p.input, value: name, choice: -1 } })); imeRef.current?.focus(); }} />}
       </svg>
 
       <input

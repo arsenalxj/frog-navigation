@@ -25,7 +25,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
 
     enum Action {
         case item(Int), delete(Int), toggle(Int), choice(Int), complete(String), draft(String),
-             command(String), calcRow(Int), input
+             command(String), calcRow(Int), custom(CustomCommandAction), input
     }
     struct Region {
         let rect: NSRect
@@ -99,8 +99,8 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     private var commandHint: String {
         if let prompt = model.prompt { return prompt.error ?? prompt.hint }
         switch model.inputKind {
-        case .search: return "Enter 打开 · Esc 清空"
-        case .command: return "Tab 补全 · ↑↓ 历史 · Esc 取消"
+        case .search: return model.buffer == .commands ? "Enter 确认筛选 · Esc 结束输入" : "Enter 打开 · Esc 清空"
+        case .command: return "Tab 补全 · ↑↓ 选择 · ⌥↑↓ 历史 · Esc 取消"
         case .calc: return model.calcFeedback ?? "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭"
         default: return ""
         }
@@ -227,6 +227,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         if model.prompt != nil {
             switch action {
             case .choice, .input: break
+            case .custom where model.prompt?.command.hasPrefix("commands-") == true: break
             default: return
             }
         }
@@ -262,6 +263,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             synchronize()
         case let .command(command): model.runCommand(command)
         case let .calcRow(index): model.selectCalcEntry(at: index)
+        case let .custom(action): performCustomAction(action, activate: activate)
         case .input:
             if model.isTextInputActive {
                 focusInput(selection: (input.currentEditor() as? NSTextView)?.selectedRange() ?? savedSelection)
@@ -340,8 +342,9 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         context.scaleBy(x: scale, y: scale)
         context.clip(to: CGRect(x: 0, y: 0, width: 1440, height: 900))
         regions.removeAll(keepingCapacity: true)
-        let showsOutput = model.buffer == nil || model.prompt != nil || model.inputKind == .command
-            || (model.inputKind != nil && model.buffer != .calc)
+        let foreignPrompt = model.buffer == .commands && model.prompt.map { !$0.command.hasPrefix("commands-") } == true
+        let showsOutput = (model.buffer != .commands || foreignPrompt) && (model.buffer == nil || model.prompt != nil || model.inputKind == .command
+            || (model.inputKind != nil && model.buffer != .calc))
         if let buffer = model.buffer {
             context.saveGState()
             if showsOutput { context.clip(to: CGRect(x: 40, y: 24, width: 1360, height: 624)) }
@@ -350,6 +353,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             if showsOutput { regions.removeAll { $0.rect.maxY > 648 } }
         } else { drawList() }
         if showsOutput { drawOutput() }
+        if model.inputKind == .command { drawCommandDiscovery() }
         drawChrome()
         context.restoreGState()
         refreshAccessibilityAndTooltips()
@@ -501,20 +505,10 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             D.text("文件夹置顶且固定；拖动书签排序、移入文件夹，或在根书签中央停留创建文件夹。o / Esc 完成。", 40, 718, size: 12, color: D.muted)
             return
         }
-        let prefix = model.inputKind == .command && !model.inputText.contains(where: { $0.isWhitespace }) ? model.inputText.lowercased() : nil
-        let commands = prefix.map { prefix in model.commands.filter { $0.name.hasPrefix(prefix) }.prefix(3) }
-        D.text(commands?.isEmpty == false ? "COMMANDS · Tab 补全 · ↑↓ 历史" : "OUTPUT", 40, 679, size: 10.5, color: D.muted)
+        D.text("OUTPUT", 40, 679, size: 10.5, color: D.muted)
         D.text(":log 查看全部", 1400, 679, size: 10.5, color: D.muted, align: .right)
         hit(NSRect(x: 1280, y: 666, width: 120, height: 22), "查看全部日志", .command("log"))
-        if let commands, !commands.isEmpty {
-            for (index, command) in commands.enumerated() {
-                let y = 698 + CGFloat(index) * 16
-                D.text(String(format: "%02d", index + 1), 48, y, size: 11.5, color: D.muted)
-                D.text(":" + command.name, 74, y, size: 12.5)
-                D.text(command.summary, 1392, y, size: 11, color: D.muted, maxWidth: 1000, align: .right)
-                hit(NSRect(x: 40, y: y - 8, width: 1360, height: 16), command.usage + " " + command.summary, .complete(command.name))
-            }
-        } else if model.logs.isEmpty {
+        if model.logs.isEmpty {
             D.text("就绪。输入 : 打开命令，/ 搜索，a 添加，? 帮助。", 40, 704, size: 12, color: D.muted)
         } else {
             for (index, entry) in model.logs.suffix(3).enumerated() {
@@ -543,7 +537,9 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         if !model.isTextInputActive {
             if model.prompt != nil { D.text(model.inputText, inputX, 773, size: 15.5, maxWidth: 1400 - inputX - hintWidth - 24) }
             else {
-                D.text(model.buffer == .settings ? ": 输入命令 · :help 查看帮助" : ": 打开命令 · / 搜索 · ? 帮助", inputX + 2, 773, color: D.muted)
+                let placeholder = model.buffer == .settings ? ": 输入命令 · :help 查看帮助"
+                    : model.buffer == .commands ? ": 输入命令 · Esc 返回" : ": 打开命令 · / 搜索 · ? 帮助"
+                D.text(placeholder, inputX + 2, 773, color: D.muted)
             }
         }
         if !commandHint.isEmpty {
@@ -571,7 +567,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             }
         }
         if model.prompt == nil, model.inputKind == nil, !model.busy {
-            D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : ": 命令 · ? 帮助",
+            D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : model.buffer == .commands ? ": 命令 · Esc 返回" : ": 命令 · ? 帮助",
                    1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
         }
         drawShortcutHints()
@@ -579,6 +575,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
 
     private func drawShortcutHints() {
         typealias D = TerminalDrawing
+        if model.buffer == .commands { return }
         var x: CGFloat = 40
         func key(_ key: String, _ label: String) {
             let width = D.key(key, x: x, y: 856)
@@ -633,7 +630,8 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         }
         if model.inputKind == .command {
             key("Tab / ⇧Tab", "补全命令")
-            key("↑↓", "命令历史")
+            key("↑↓", "选择候选")
+            key("⌥↑↓", "命令历史")
             key("Enter", "执行命令")
             key("Esc", model.buffer == .calc ? "返回算式" : "取消命令")
             return
@@ -659,6 +657,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                 key(":", "输入设置命令")
                 key(":help", "帮助")
                 key("Esc", "返回书签")
+            case .commands: break
             case .help, .log, .job:
                 key("j/k / ↑↓", "滚动")
                 key("PgUp / PgDn", "翻屏")
@@ -734,7 +733,11 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                 element.press = { [weak self] in
                     guard let self else { return false }
                     if self.model.prompt != nil {
-                        switch action { case .choice, .input: break; default: return false }
+                        switch action {
+                        case .choice, .input: break
+                        case .custom where self.model.prompt?.command.hasPrefix("commands-") == true: break
+                        default: return false
+                        }
                     }
                     self.perform(action, activate: true)
                     return true

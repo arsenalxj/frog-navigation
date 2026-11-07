@@ -2,6 +2,62 @@
 
 内部身份已统一为 Frog。旧身份的原始验收记录归档到项目同级 `frog-navigation-history/20260915-051305/`，不作为本次身份变更的验证结果。
 
+## Ghostty 标签页复用（2026-11-07）
+
+- Ghostty 执行改为优先复用已运行实例：通过 AppleScript 字典（`new surface configuration` + `new tab in front window`）在当前窗口新建标签页，设置工作目录、启动命令与“命令结束后保留标签”；Ghostty 未运行或脚本失败时才回退到 `--window-save-state=never` 的独立实例，并在结果区注明回退原因。
+- 本机 Ghostty 1.3.1 实测：`new tab with configuration` 可用；命令结束后标签保留，原有两个标签保持不变，未产生新 Ghostty 进程。标签页关闭由验收脚本按新增 id 精确关闭，未动原有标签。
+- `swift test`：**205 项通过，0 失败**。新增 AppleScript 字面量转义回归（引号、反斜杠、中文与空格路径）。
+- 独立验收 **11 项通过**：运行中复用、仅新增一个标签、原有数量与顺序保留、无新实例、指定中文特殊字符目录、参数保持字面值且不执行注入、登录环境解析到真实 `omp`、真实窗口截图、测试标签清理。证据：`build/ghostty-tab-smoke-lHlB2u/verification.json`、`tab.png`。
+- 授权与边界：自动化权限以系统状态为准（本机已允许）；拒绝或 `macos-applescript=false` 时回退为新窗口并在结果区提示。未验证多窗口下“front window”选取异常、全屏与多屏场景。
+- Release 重建，固定证书签名与 arm64 校验通过；日志 `build/build-release-20261107-174422.log`。未安装、未提交、未改写正式数据。
+
+## 目录浏览 Enter 语义修正（2026-11-07）
+
+- 问题：进入浏览后默认高亮第一项，按 Enter 会把输入路径替换成高亮目录（例如 `assets/`），看起来像“保存”却改了值。
+- 现在 Enter 只退出浏览并保留输入框路径，从不应用高亮；选择目录改用 `Tab`（选择并进入）与 `⇧Tab`（上一级），`↑↓` 仅移动高亮，点击候选等同 Tab。提示、脚注、README 与 SPEC 同步更新。
+- `swift test`：**204 项通过，0 失败**。浏览回归改写为“Enter 退出不改路径 → 再次 Enter 回到浏览 → Tab 进入 → ⇧Tab 上级并预选 → Tab 继续进入 → Enter 保留 Tab 选择”，并保留草稿与保存断言。
+- 原生窗口 **16 项检查通过**：字段模式、进入浏览不改路径、默认高亮不等于选中、Enter 退出不替换草稿、Tab/⇧Tab 往返、保存为 Tab 选中的目录。证据：`build/enter-exit-smoke/verification.json`、`browse-highlight.png`、`tab-selected.png`。
+- Release 重建，固定证书签名与 arm64 校验通过；日志 `build/build-release-20261107-173915.log`。未安装、未提交、未改写正式数据。
+
+## 代码审查修复（2026-11-07）
+
+对本次自定义命令改动运行 `ocr review`（17 文件 / 22 条），修复其中高、中风险项；设计原型同步修正。
+
+- 命令页按键不再无条件接管：只有 `commands-edit` / `commands-delete` 提示流由自定义处理器处理。`buffer == .commands` 时启动的 `:backup`、`:restore`、`:cd`、`:delete` 等内置提示流现在能正常显示、提交与取消；提交路径不再被提前拦截。
+- 视图层同步收窄：非自定义提示流会绘制输出面板与候选点击区域，`.custom` 命中区域仅对 `commands-` 提示流放行（鼠标与辅助功能一致）。
+- 目录浏览修复：⇧Tab 预选改为保存绝对路径；字段编辑器键入会先退出浏览并保留新输入，不再出现“键入后又按 Esc 恢复旧路径”的静默丢弃。
+- 命令列表滚轮会同步夹取 `customIndex`，选中行始终在可视窗口内，Enter 不会执行屏幕外命令。
+- 后台程序可终止：执行器持有线程安全的进程句柄，执行页 `Esc` 终止并显示退出状态，不再永久占用“正在执行”。
+- `pathChoices` 保留用户输入的 `.` / `..` 语义：列出该目录内容，而不是标准化后错列祖父目录。
+- 删除确认不再吞掉 ⌘Q、⌘N、⌘, 等菜单快捷键。
+- 原型修复：损坏 localStorage 可由下次保存恢复；同一命令连续预览改为按调用序号重挂；命令类型改用 `Object.hasOwn` 校验；示例目录改为 `~/Documents/...`；成功提示与错误分色；帮助 SYNOPSIS 不再宣称种子命令；浮层位置改用 `BV` 布局。
+- `swift test`：**204 项通过，0 失败**。新增 6 项回归：命令页内 `:delete` 提示可用且不执行选中命令、`:cd` 提示自动提交、滚轮后选中项可见、⇧Tab 预选非首项目录、`Esc` 终止 `sleep 30`、`.`／`..` 补全语义。
+- 原生窗口冒烟 **5 项通过**：命令页内 `:restore` 提示流与路径候选绘制并生成可点击区域，`Esc` 只取消提示流并保留命令缓冲区；截图 `build/foreign-prompt-smoke/foreign-prompt.png`。
+- 原型浏览器验证：种子为中性路径；`:gh first` 连续预览两次均生效；损坏存储后保存可覆盖恢复且错误提示清除；`:backup` 提示流显示在命令页上方并可取消；控制台无错误。
+- Release 重新构建，固定证书签名与 arm64 校验通过；日志 `build/build-release-20261107-170556.log`。未安装、未提交、未改写正式数据。
+
+## 终端检测、Ghostty 与字段键盘导航（2026-11-07）
+
+- 自动发现已安装的受支持终端（Terminal／iTerm2／Ghostty），与执行器共享 NSWorkspace 应用定位；旧配置指向缺失终端时保留值并标识，不自动替换。本机实际检测到 Terminal 与 Ghostty 1.3.1。
+- 编辑字段分两种模式，互不抢键：字段模式 `↑↓` 或 `Tab / ⇧Tab` 切字段（到末尾不循环），`←→`／空格改选项；目录字段按 `Enter` 才进入浏览。浏览模式 `↑↓` 选候选不改输入，`Tab` 深入，`⇧Tab` 返回上一级并预选刚离开的目录，`Enter` 确认并回到字段模式，`Esc` 退出浏览并恢复进入前路径，直接键入则自动退出浏览。类型／终端仍用空格或 ←→ 改值。
+- `swift test`：**198 项通过，0 失败**。新增与改写覆盖：Enter 才进入浏览、进入浏览不改路径、浏览中方向键不切字段、Tab 深入、⇧Tab 上级并预选、Enter 确认后方向键恢复切字段、Esc 分层退出与键入恢复编辑；Ghostty 启动脚本真实执行的字面参数、cwd、自清理与失败目录。
+- 独立原生 AppKit 窗口完成 **34 项检查**：逐字段 ↑↓ 往返、Ghostty 检测与左右键选择、目录浏览、中文目录深入、退格、`⌘Enter` 落盘与重载。真实启动 Ghostty 新实例，在中文特殊字符目录中以字面参数执行命令并成功运行 `omp --version`（`omp/18.16.0`）；原有 Ghostty（PID 624）未被复用或关闭，只结束测试新实例。
+- 另一次独立原生窗口 **20 项检查**专测浏览模式：`READY`／`BROWSING` 状态、Enter 进入、浏览中方向键与字段切换互不干扰、Esc 恢复路径且不取消编辑、Tab／⇧Tab 往返与预选、确认后按 ↑↓ 回到字段切换、`⌘Enter` 落盘，全程未打开系统面板。
+- 第一次启动时观察到 Ghostty 命令实例会恢复用户已有窗口；据此增加 `--window-save-state=never`，修正后重新验收通过。
+- 证据：`build/directory-browse-smoke-aQQ0xk/verification.json`、`field-mode.png`、`browse-mode.png`、`confirmed.png`；`build/ghostty-final-smoke-uuortB/verification.json`、`launch.json`、`ghostty-window.png` 及 cwd／参数／版本文本。临时冒烟源码和可执行文件已清理；不修改正式命令、书签数据或系统权限。
+- 验收边界：使用进程内生产键盘路由与真实 NSTextView，不注入系统级物理按键；未验证 iTerm2 实际启动，未向 OMP 提交任务。Release 构建、固定证书签名与 arm64 校验通过（日志 `build/build-release-20261107-162934.log`），未替换正式安装、未提交代码。
+
+## macOS 自定义命令（2026-11-07）
+
+- 已实现 `:commands` 管理及 `:<名称> [输入]` 真实执行，覆盖 Terminal／iTerm2 配置、无终端程序、HTTP／HTTPS 网址。列表、编辑、删除确认和执行结果按计算器缓冲区风格原生绘制。
+- `swift test`：**192 项通过，0 失败**。新增命令存储 10 项、执行器 11 项、模型 4 项；覆盖损坏／未知版本阻止覆盖、外部写入冲突、原子保存、重复及保留名、取消草稿、删除范围、参数注入字面值、真实子进程工作目录／退出码／双流输出及输出上限。历史按键契约改为 `⌥↑↓`；移除依赖固定命令排序的旧补全断言测试。
+- 独立原生 AppKit 窗口在真实 `NSApplication.run()` 循环中完成 **24 项检查**：keyWindow／字段编辑器、命令发现、键盘创建保存、预填退格、Tab 往返、Esc 取消、重载、删除取消、字段空白点击、实际程序执行、缺失目录错误及计算器回归。证据：`build/custom-command-smoke-oCc341/verification.json` 与 `empty/list/edit/delete/discovery/program-result/missing-directory/calc/terminal-dispatched.png`。
+- 真实 Terminal 通过 NSWorkspace 接收私有 `.command`，在含中文、空格、单引号、分号的隔离目录下写出 cwd；登录交互 shell 解析到 `/Users/arsenalxj/.bun/bin/omp`，`omp --version` 为 `omp/18.16.0`。随后观察到 PID `98693` 的实际命令为 `bun /Users/arsenalxj/.bun/bin/omp`；后续检查该测试 PID 已退出。未向 OMP 提交任务，不将此结果描述为完整会话功能验收。目录／版本证据见同目录 `terminal-cwd.txt`、`omp-path.txt`、`omp-version.txt`。
+- 网址动作实际调用默认浏览器；本地服务器收到 `query=%E4%B8%AD%E6%96%87%20%26%20a%3Bb`（原输入 `中文 & a;b`）请求并返回 HTTP 200。执行器仍只报告浏览器交接，不宣称远端页面加载成功。
+- `scripts/build-release.sh` 通过；固定 `Frog Local Code Signing` 签名、严格签名校验和 arm64 校验通过。产物 `build/青蛙导航.app`；日志 `build/build-release-20261107-144601.log`。直接启动签名应用，以隔离目录验证 PID `99662` 的数据载入与首轮交互布局，随后停止测试进程；见 `release-startup.json`。
+- 临时冒烟源码与可执行文件已清理，保留验收数据与截图。不安装、不提交、不改写正式书签或正式命令配置。未验证 iTerm2 实际启动、系统级物理键盘注入、终端内 OMP 的完整会话操作；程序型不带终端的长任务不提供中止按钮，应由脚本自行退出或在系统中管理进程。
+
+
 ## 收起界面清空搜索（2026-11-06）
 
 - 窗口统一收起入口清空搜索词，退出搜索输入并恢复未筛选列表；编辑草稿、命令输入与文件夹展开状态保留。
