@@ -2,6 +2,33 @@
 
 内部身份已统一为 Frog。旧身份的原始验收记录归档到项目同级 `frog-navigation-history/20260915-051305/`，不作为本次身份变更的验证结果。
 
+## 打开目录的 shell 初始化修复（2026-11-09）
+
+- 修复二次启动交互 shell 重读 `.zshrc` 导致工作目录偏离配置的问题。目录动作改为单个交互登录 zsh，按原顺序衔接用户启动文件，在最后一个启动阶段结束后切换目录；保留用户 shell 状态并清理私有临时启动文件。Finder 与其他命令动作不变。
+- 新增行为回归在修复前出现 6 个断言失败：目标目录不正确、最终 shell 非登录状态、用户配置重复读取。修复后 `swift test` **216 项通过，0 失败**；覆盖默认 HOME 与自定义 ZDOTDIR、启动文件内 cd、PATH／别名／函数保留、初始化顺序及临时文件清理。
+- 生产执行器生成的脚本在真实 PTY 中验证 `.zshenv` 重定向 ZDOTDIR 和 `unsetopt rcs` 两种场景：目标目录正确、交互登录状态保留、初始化顺序正确、临时文件清理、后续命令可主动切换目录。重定向场景还核对首次提示符的目录以及 PATH／别名／函数。记录：`build/directory-startup-fix/verification.json` 及各场景 `pty.log`。
+- 一次验收等待 logout 超时，隔离子进程已清理；不将该次正常退出列为验收通过。未重新验证终端 GUI 交接，未重新打包、安装或提交，已有 Release 包尚未包含此修复。临时验收源码和可执行文件已清理。
+- 随后按用户授权完成 Release 打包与正式安装：固定签名、arm64 校验和 ZIP 实际解压校验通过，`/Applications/青蛙导航.app` 已更新，安装二进制与构建产物 SHA-256 一致（`739fd21ae15729762a831393ba2bdf8272fd33da446c13bc4cf03f0d815a61d0`）。旧版已验证并归档至 `build/install-backup/Frog-previous.zip`，系统应用注册已刷新。发布包：`build/青蛙导航-macOS-arm64.zip`；构建日志：`build/build-release-20261109-152552.log`。未启动正式应用、未提交代码。
+
+## 打开目录支持 Finder（2026-11-09）
+
+- 「打开目录」的选择字段改为「打开方式」，提供已安装终端与 Finder。Finder 使用 NSWorkspace 指定应用打开文件夹，不生成 shell 脚本；其他动作不能保存 Finder，切换类型自动恢复适用选项。保留原 JSON 字段和已有终端配置兼容性。
+- `swift test`：**215 项通过，0 失败**。覆盖 Finder 保存重载、动作限制、选项切换、无终端时仍可选择 Finder、运行参数与无效目录拒绝。
+- 独立 AppKit 窗口验证真实输入焦点、键盘选择 Finder、保存重载；截图 `build/finder-directory-smoke/finder-option.png`。生产执行器实际打开含中文、空格、单引号及分号的目录，核对 Finder 前台身份、窗口目标路径和目录内容截图，确认不是仅定位父目录。证据：同目录 `smoke.log`、`finder-window.png`。
+- 原型真实浏览器验证 Finder 选择、预览、保存重载，控制台无错误。正式执行无需 AppleScript 自动化；验收读取 Finder 窗口路径前检查已有授权，未请求新权限。
+- 未改写正式数据，未重新打包或安装；此前 Release 包不包含本次 Finder 支持。未重新验收各终端 GUI 交接。临时验收源码和可执行文件已清理。
+- 随后按用户授权重新打包 Finder 版本：固定证书签名、稳定身份、arm64 架构校验通过；`build/青蛙导航.app` 和 `build/青蛙导航-macOS-arm64.zip` 已更新。ZIP 实际解压核验 16 个条目、签名、内容与权限一致。日志：`build/build-release-20261109-142834.log`；二进制 SHA-256：`b81b1eabb4d47c3fea3fb4418214391dfd77ca159459cddbbdbcb9e230474752`。未安装、未提交。
+
+## 打开目录动作（2026-11-09）
+
+- 新增 `directory`「打开目录」类型，只显示命令名、名称、动作类型、工作目录、终端；保存清除不适用的执行内容及参数。复用现有终端启动链，进入工作目录后运行交互式 zsh，不接受运行参数。
+- `swift test`：**209 项通过，0 失败**。覆盖保存重载、旧脚本参数清除、无终端与非法目录拒绝、类型切换及字段导航、运行参数拒绝。
+- 独立 AppKit 窗口在 `NSApplication.run()` 中验证 keyWindow、真实 NSTextView 输入、类型切换、目录输入、直接切换终端字段、保存及重载。截图：`build/directory-action-smoke/final/edit.png`，未注入系统级物理按键。
+- 生产执行器生成的启动脚本在真实 PTY 中运行，确认中文、空格、单引号与分号目录的实际 `$PWD` 正确、shell 处于交互模式、可执行第二条输入命令，启动脚本自动清理。记录：`build/directory-action-smoke/shell.log`。使用隔离 HOME／ZDOTDIR，不改写正式数据。
+- 原型真实浏览器验证新建、五字段编辑、保存重载、目录预览和运行参数拒绝；浏览器错误记录为空。
+- 本轮未重新验收 Terminal／iTerm2／Ghostty 的 GUI 交接与自动化授权，未打包、安装、提交。临时冒烟源码和可执行文件已清理。
+- 随后按用户授权完成 Release 打包：固定证书签名、稳定身份和 arm64 校验通过；`build/青蛙导航.app` 与 `build/青蛙导航-macOS-arm64.zip` 已生成，ZIP 实际解压验证 16 个条目、签名、内容及权限一致。日志：`build/build-release-20261109-141526.log`；二进制 SHA-256：`42a75ef7ec53df5fd820e25284b65d4720dc9a6b45ac5efbdf0c68f8b389d837`。未安装、未提交。
+
 ## Ghostty 标签页复用（2026-11-07）
 
 - Ghostty 执行改为优先复用已运行实例：通过 AppleScript 字典（`new surface configuration` + `new tab in front window`）在当前窗口新建标签页，设置工作目录、启动命令与“命令结束后保留标签”；Ghostty 未运行或脚本失败时才回退到 `--window-save-state=never` 的独立实例，并在结果区注明回退原因。

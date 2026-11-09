@@ -58,6 +58,106 @@ final class CustomCommandModelTests: XCTestCase {
         XCTAssertNil(model.prompt)
         XCTAssertEqual(model.customScreen, .list)
     }
+    func testProgramSwitchesToDirectoryWithTerminalAndPersistsOnlyVisibleFields() async throws {
+        let model = try await model()
+        try await add(model)
+        model.beginCustomEdit(try XCTUnwrap(model.selectedCustomCommand))
+        model.installedCustomTerminals = [.ghostty, .terminal]
+        XCTAssertEqual(model.customDraft?.terminal, CustomCommandTerminal.none)
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .type)))
+        model.cycleCustomOption(1)
+        XCTAssertEqual(model.customDraft?.type, .url)
+        model.cycleCustomOption(1)
+        XCTAssertEqual(model.customDraft?.type, .directory)
+        XCTAssertEqual(model.customDraft?.terminal, .ghostty)
+        XCTAssertEqual(model.customTerminalOptions, [.ghostty, .terminal, .finder])
+        XCTAssertEqual(model.customFields, [.name, .title, .type, .directory, .terminal])
+        model.moveCustomField(1)
+        XCTAssertEqual(model.customField, .directory)
+        model.moveCustomField(1)
+        XCTAssertEqual(model.customField, .terminal)
+        model.moveCustomField(-1)
+        XCTAssertEqual(model.customField, .directory)
+        model.saveCustomDraft()
+        try await wait { !model.customSaving }
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.customScreen, .list)
+        model.loadCustomCommands()
+        await model.customLoadTask?.value
+        let saved = try XCTUnwrap(model.selectedCustomCommand)
+        XCTAssertEqual(model.customCommands.count, 1)
+        XCTAssertEqual(saved.type, .directory)
+        XCTAssertEqual(saved.directory, model.store.directory.path)
+        XCTAssertEqual(saved.terminal, .ghostty)
+        XCTAssertEqual(saved.target, "")
+        XCTAssertEqual(saved.arguments, "")
+        model.beginCustomEdit(saved)
+        XCTAssertEqual(model.customFields, [.name, .title, .type, .directory, .terminal])
+        model.escape()
+    }
+
+    func testFinderDirectorySavesAndReloadsWithoutTerminal() async throws {
+        let model = try await model()
+        model.openCustomCommands()
+        model.beginCustomEdit()
+        let command = CustomCommand(name: "finder-folder", title: "项目目录", type: .directory,
+                                    directory: model.store.directory.path, target: "", terminal: .finder)
+        model.customDraft = command
+        model.showCustomField()
+        model.installedCustomTerminals = []
+        XCTAssertEqual(model.customTerminalOptions, [.finder])
+        model.saveCustomDraft()
+        try await wait { !model.customSaving }
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.customScreen, .list)
+        model.loadCustomCommands()
+        await model.customLoadTask?.value
+        XCTAssertEqual(model.customCommands, [command])
+        model.beginCustomEdit(try XCTUnwrap(model.selectedCustomCommand))
+        XCTAssertEqual(model.customDraft?.terminal, .finder)
+        XCTAssertEqual(model.customFields, [.name, .title, .type, .directory, .terminal])
+        model.escape()
+    }
+
+    func testFinderIsClearedWhenSwitchingToNonDirectoryKinds() async throws {
+        let model = try await model()
+        let cases: [(Int, CustomCommandKind, CustomCommandTerminal)] = [
+            (1, .terminal, .ghostty), (2, .program, .none), (-1, .url, .none)
+        ]
+        for (direction, kind, terminal) in cases {
+            model.beginCustomEdit(CustomCommand(name: "folder", title: "项目目录", type: .directory,
+                                                directory: model.store.directory.path, target: "", terminal: .finder))
+            model.installedCustomTerminals = [.ghostty, .terminal]
+            model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .type)))
+            model.cycleCustomOption(direction)
+            XCTAssertEqual(model.customDraft?.type, kind)
+            XCTAssertEqual(model.customDraft?.terminal, terminal)
+            XCTAssertFalse(model.customTerminalOptions.contains(.finder))
+            model.escape()
+        }
+    }
+
+    func testDirectoryCommandRejectsMissingFolderAndRegularFileOnSave() async throws {
+        let model = try await model()
+        let file = model.store.directory.appendingPathComponent("普通文件")
+        try Data().write(to: file)
+        model.beginCustomEdit(CustomCommand(name: "folder", title: "打开项目", type: .directory,
+                                            directory: model.store.directory.path, target: "", terminal: .terminal))
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
+        for path in [model.store.directory.appendingPathComponent("不存在的目录").path, file.path] {
+            model.updateInput(path)
+            model.saveCustomDraft()
+            try await wait { !model.customSaving }
+            XCTAssertEqual(model.customScreen, .edit)
+            XCTAssertNotNil(model.prompt?.error)
+            XCTAssertEqual(model.inputText, path)
+            XCTAssertTrue(model.customCommands.isEmpty)
+        }
+        let saved = try await model.customStore.load(reservedNames: LauncherModel.reservedCommandNames)
+        XCTAssertTrue(saved.isEmpty)
+        model.escape()
+    }
+
     func testDuplicateSavePreservesDraftAndStoredCommands() async throws {
         let model = try await model()
         try await add(model)
@@ -298,6 +398,10 @@ final class CustomCommandModelTests: XCTestCase {
         model.customDraft?.type = .terminal
         XCTAssertTrue(model.customTerminalOptions.isEmpty)
         XCTAssertEqual(model.customDraft?.terminal, .iTerm2)
+        model.customDraft?.type = .directory
+        XCTAssertEqual(model.customTerminalOptions, [.finder])
+        model.installedCustomTerminals = [.ghostty, .terminal]
+        XCTAssertEqual(model.customTerminalOptions, [.ghostty, .terminal, .finder])
     }
 
     func testForeignPromptFromCommandsBufferStaysUsable() async throws {

@@ -32,11 +32,15 @@ extension LauncherModel {
         return items.indices.contains(customIndex) ? items[customIndex] : nil
     }
     var customFields: [CustomCommandField] {
-        customDraft?.type == .url ? [.name, .title, .type, .target] : CustomCommandField.allCases
+        switch customDraft?.type {
+        case .url: [.name, .title, .type, .target]
+        case .directory: [.name, .title, .type, .directory, .terminal]
+        default: CustomCommandField.allCases
+        }
     }
     var customField: CustomCommandField { customFields[min(customFieldIndex, customFields.count - 1)] }
     var customTerminalOptions: [CustomCommandTerminal] {
-        (customDraft?.type == .program ? [.none] : []) + installedCustomTerminals
+        (customDraft?.type == .program ? [.none] : []) + installedCustomTerminals + (customDraft?.type == .directory ? [.finder] : [])
     }
 
     func refreshCustomTerminals() {
@@ -44,7 +48,11 @@ extension LauncherModel {
     }
 
     func customTerminalLabel(_ terminal: CustomCommandTerminal) -> String {
-        terminal.label + (terminal != .none && !installedCustomTerminals.contains(terminal) ? "（未安装）" : "")
+        terminal.label + (terminal != .none && terminal != .finder && !installedCustomTerminals.contains(terminal) ? "（未安装）" : "")
+    }
+
+    func customFieldLabel(_ field: CustomCommandField, command: CustomCommand) -> String {
+        field == .terminal && command.type == .directory ? "打开方式" : field.label
     }
 
     var isCustomDirectoryEditing: Bool {
@@ -195,10 +203,17 @@ extension LauncherModel {
     }
     var customExecutionRows: [(String, String)] {
         guard let command = customExecutionCommand else { return [] }
-        var rows: [(String, String)] = command.type == .url
-            ? [("网址模板", command.target), ("查询参数", customExecutionInput)]
-            : [("工作目录", command.directory), ("终端", command.terminal.label), ("执行内容", command.target),
-               ("参数模板", command.arguments.isEmpty ? "（无）" : command.arguments), ("输入参数", customExecutionInput.isEmpty ? "（无）" : customExecutionInput)]
+        var rows: [(String, String)]
+        switch command.type {
+        case .url:
+            rows = [("网址模板", command.target), ("查询参数", customExecutionInput)]
+        case .directory:
+            rows = [("工作目录", command.directory), ("打开方式", command.terminal.label),
+                    ("行为", command.terminal == .finder ? "在 Finder 中打开文件夹" : "进入目录并保持终端可输入")]
+        case .terminal, .program:
+            rows = [("工作目录", command.directory), ("终端", command.terminal.label), ("执行内容", command.target),
+                    ("参数模板", command.arguments.isEmpty ? "（无）" : command.arguments), ("输入参数", customExecutionInput.isEmpty ? "（无）" : customExecutionInput)]
+        }
         rows.append(("状态", customExecutionSummary))
         rows.append(contentsOf: customExecutionOutput.enumerated().map { ("输出 \($0.offset + 1)", $0.element) })
         return rows
@@ -294,9 +309,10 @@ extension LauncherModel {
         let field = customField
         if field == .terminal { refreshCustomTerminals() }
         let hint = field == .directory ? customDirectoryHint
+            : field == .terminal && draft.type == .directory ? "Finder / 已安装终端 · ↑↓ 切字段 · ←→ / 空格改值"
             : field == .terminal ? "已检测 \(installedCustomTerminals.count) 个终端 · ↑↓ 切字段 · ←→ / 空格改值"
             : field.isOption ? "↑↓ 切换字段 · ←→ / 空格改值 · ⌘Enter 保存" : "↑↓ 切换字段 · ⌘Enter 保存 · Esc 取消"
-        prompt = TerminalPrompt(command: "commands-edit", field: field.label,
+        prompt = TerminalPrompt(command: "commands-edit", field: customFieldLabel(field, command: draft),
                                 hint: hint,
                                 acceptsText: !field.isOption)
         setInput(.prompt, text: customValue(field, command: draft))
@@ -325,7 +341,10 @@ extension LauncherModel {
             let values = CustomCommandKind.allCases
             let index = values.firstIndex(of: draft.type) ?? 0
             draft.type = values[(index + direction + values.count) % values.count]
-            if draft.type == .terminal, draft.terminal == .none { draft.terminal = installedCustomTerminals.first ?? .terminal }
+            if draft.terminal == .finder && draft.type != .directory {
+                draft.terminal = draft.type == .terminal ? installedCustomTerminals.first ?? .terminal : .none
+            }
+            if (draft.type == .terminal || draft.type == .directory), draft.terminal == .none { draft.terminal = installedCustomTerminals.first ?? .terminal }
             if draft.type == .program { draft.terminal = .none }
         } else if customField == .terminal {
             refreshCustomTerminals()

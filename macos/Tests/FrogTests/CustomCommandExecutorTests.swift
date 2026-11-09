@@ -152,6 +152,115 @@ final class CustomCommandExecutorTests: XCTestCase {
     }
 
     @MainActor
+    func testDirectoryPreparationRejectsRuntimeInputEvenWithStaleArgumentTemplate() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let command = CustomCommand(name: "folder", title: "打开项目", type: .directory,
+                                    directory: directory.path, target: "pwd", arguments: "{args}", terminal: .terminal)
+        let executor = CustomCommandExecutor()
+        let prepared = try executor.prepareTerminalScript(command, input: "")
+        defer { try? FileManager.default.removeItem(at: prepared.deletingLastPathComponent()) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.path))
+        do {
+            let unexpected = try executor.prepareTerminalScript(command, input: "额外参数; touch forbidden")
+            defer { try? FileManager.default.removeItem(at: unexpected.deletingLastPathComponent()) }
+            XCTFail("打开目录不应接受运行参数")
+        } catch {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("forbidden").path))
+    }
+
+    @MainActor
+    func testDirectoryStartsAfterUserLoginConfigurationAndPreservesShellState() throws {
+        let root = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let requested = root.appendingPathComponent("项目 空格 ' ; requested")
+        let startup = root.appendingPathComponent("startup")
+        let custom = root.appendingPathComponent("custom-config")
+        for directory in [requested, startup, custom] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        }
+        for configuration in [root, custom] {
+            for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+                var content = "printf '%s\\n' \(CustomCommandExecutor.shellQuote(file)) >> \(CustomCommandExecutor.shellQuote(root.appendingPathComponent("startup.log").path))\n"
+                content += "builtin cd -- \(CustomCommandExecutor.shellQuote(startup.path))\n"
+                if file == ".zprofile" { content += "export PATH=/frog-test-bin:$PATH\n" }
+                if file == ".zshrc" { content += "alias frog_alias='printf alias-ok'\nfrog_function() { printf function-ok; }\n" }
+                try Data(content.utf8).write(to: configuration.appendingPathComponent(file))
+            }
+        }
+        for configuredZdotdir in [false, true] {
+            try Data().write(to: root.appendingPathComponent("startup.log"))
+            let command = CustomCommand(name: "folder", title: "打开项目", type: .directory, directory: requested.path)
+            let script = try CustomCommandExecutor().prepareTerminalScript(command, input: "")
+            defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+            let input = Pipe()
+            let output = Pipe()
+            let process = Process()
+            process.executableURL = script
+            var environment = ["HOME": root.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TERM": "dumb"]
+            if configuredZdotdir { environment["ZDOTDIR"] = custom.path }
+            process.environment = environment
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            try input.fileHandleForWriting.write(contentsOf: Data("printf 'cwd=%s\\n' \"$PWD\"\nprintf 'zdotdir=%s:%s\\n' \"${+ZDOTDIR}\" \"${ZDOTDIR-}\"\n[[ -o interactive && -o login ]] && printf 'interactive-login\\n'\nfrog_alias; frog_function; printf '\\n'\n[[ $PATH == /frog-test-bin:* ]] && printf 'path-ok\\n'\nexit\n".utf8))
+            try input.fileHandleForWriting.close()
+            let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0)
+            XCTAssertTrue(result.contains("cwd=\(requested.resolvingSymlinksInPath().path)\n"), result)
+            XCTAssertTrue(result.contains(configuredZdotdir ? "zdotdir=1:\(custom.path)\n" : "zdotdir=0:\n"), result)
+            XCTAssertTrue(result.contains("interactive-login\n"), result)
+            XCTAssertTrue(result.contains("alias-okfunction-ok\n"), result)
+            XCTAssertTrue(result.contains("path-ok\n"), result)
+            XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("startup.log"), encoding: .utf8), ".zshenv\n.zprofile\n.zshrc\n.zlogin\n")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: script.deletingLastPathComponent().path))
+        }
+    }
+
+    @MainActor
+    func testFinderIsExcludedFromInstalledTerminals() {
+        XCTAssertFalse(CustomCommandExecutor.installedTerminals().contains(.finder))
+    }
+
+    @MainActor
+    func testFinderDirectoryCannotPrepareTerminalScript() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let command = CustomCommand(name: "folder", title: "项目目录", type: .directory,
+                                    directory: directory.path, target: "", terminal: .finder)
+        do {
+            let unexpected = try CustomCommandExecutor().prepareTerminalScript(command, input: "")
+            defer { try? FileManager.default.removeItem(at: unexpected.deletingLastPathComponent()) }
+            XCTFail("Finder must not prepare a terminal script")
+        } catch {}
+    }
+
+    @MainActor
+    func testFinderDirectoryRejectsRuntimeInputMissingDirectoryAndRegularFile() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("plain-file")
+        try Data("plain".utf8).write(to: file)
+        let cases = [
+            (directory.path, "extra; touch forbidden"),
+            (directory.path, " "),
+            (directory.appendingPathComponent("absent").path, ""),
+            (file.path, "")
+        ]
+        for (path, input) in cases {
+            let command = CustomCommand(name: "folder", title: "项目目录", type: .directory,
+                                        directory: path, target: "pwd", arguments: "{args}", terminal: .finder)
+            do {
+                _ = try await CustomCommandExecutor().execute(command, input: input)
+                XCTFail("Expected rejection for path \(path), input \(input)")
+            } catch {}
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("forbidden").path))
+    }
+
+    @MainActor
     func testPreparedGhosttyScriptExecutesLiteralArgumentsAndCleansUp() throws {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

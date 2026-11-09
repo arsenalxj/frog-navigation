@@ -56,6 +56,7 @@ final class CustomCommandExecutor {
         case .terminal: identifier = "com.apple.Terminal"
         case .iTerm2: identifier = "com.googlecode.iterm2"
         case .ghostty: identifier = "com.mitchellh.ghostty"
+        case .finder: identifier = "com.apple.finder"
         case .none: return nil
         }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier),
@@ -64,7 +65,7 @@ final class CustomCommandExecutor {
     }
 
     static func installedTerminals() -> [CustomCommandTerminal] {
-        CustomCommandTerminal.allCases.filter { applicationURL(for: $0) != nil }
+        [.terminal, .iTerm2, .ghostty].filter { applicationURL(for: $0) != nil }
     }
 
     func execute(_ command: CustomCommand, input: String) async throws -> CustomCommandExecutionResult {
@@ -79,6 +80,22 @@ final class CustomCommandExecutor {
 
         let directory = try Self.directoryURL(command.directory)
         let arguments = try Self.arguments(template: command.arguments, input: input)
+        if command.terminal == .finder {
+            guard let finder = Self.applicationURL(for: .finder) else {
+                throw CustomCommandExecutionError.invalid("未找到 Finder，无法打开目录。")
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            configuration.addsToRecentItems = false
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                NSWorkspace.shared.open([directory], withApplicationAt: finder, configuration: configuration) { application, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else if application == nil { continuation.resume(throwing: CustomCommandExecutionError.invalid("Finder 未返回已启动的应用。")) }
+                    else { continuation.resume() }
+                }
+            }
+            return CustomCommandExecutionResult(summary: "已交给 Finder 打开目录。", output: directory.path, exitCode: nil)
+        }
         if command.type == .program && command.terminal == .none {
             let executable = try Self.executableURL(command.target)
             let cancellation = runningProgram
@@ -182,30 +199,31 @@ final class CustomCommandExecutor {
     // The receiver owns the file after dispatch; removing it sooner races Launch Services.
     func prepareTerminalScript(_ command: CustomCommand, input: String) throws -> URL {
         let command = try command.validated(reservedNames: [])
-        guard command.type != .url, command.terminal != .none else {
+        guard command.type != .url, command.terminal != .none, command.terminal != .finder else {
             throw CustomCommandExecutionError.invalid("请选择使用终端应用的命令。")
         }
         let directory = try Self.directoryURL(command.directory)
         let arguments = try Self.arguments(template: command.arguments, input: input)
-        let target = command.type == .program
-            ? Self.shellQuote(try Self.executableURL(command.target).path)
-            : command.target
-        guard !target.contains("\0") else {
-            throw CustomCommandExecutionError.invalid("执行内容不能包含空字符。")
-        }
-        // Startup files establish the login PATH; cd afterwards preserves the requested cwd.
-        let body = "cd -- \(Self.shellQuote(directory.path)) || { printf '%s\\n' '无法进入工作目录，请检查目录是否存在及访问权限。' >&2; exit 1; }\n\(target) \"$@\""
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("frog-command-\(UUID().uuidString)", isDirectory: true)
         let script = temporaryDirectory.appendingPathComponent("run.command")
-        let content = """
-        #!/bin/sh
-        /bin/rm -f -- \(Self.shellQuote(script.path))
-        /bin/rmdir -- \(Self.shellQuote(temporaryDirectory.path))
-        exec /bin/zsh -lic \(Self.shellQuote(body)) frog-custom-command\(arguments.map { " " + Self.shellQuote($0) }.joined())
-        """ + "\n"
         do {
             try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let content: String
+            if command.type == .directory {
+                content = try prepareDirectoryStartup(directory: directory, temporaryDirectory: temporaryDirectory)
+            } else {
+                let target = command.type == .program
+                    ? Self.shellQuote(try Self.executableURL(command.target).path) : command.target
+                // Startup files establish the login PATH; cd afterwards preserves the requested cwd.
+                let body = "cd -- \(Self.shellQuote(directory.path)) || { printf '%s\\n' '无法进入工作目录，请检查目录是否存在及访问权限。' >&2; exit 1; }\n\(target) \"$@\""
+                content = """
+                #!/bin/sh
+                /bin/rm -f -- \(Self.shellQuote(script.path))
+                /bin/rmdir -- \(Self.shellQuote(temporaryDirectory.path))
+                exec /bin/zsh -lic \(Self.shellQuote(body)) frog-custom-command\(arguments.map { " " + Self.shellQuote($0) }.joined())
+                """ + "\n"
+            }
             guard FileManager.default.createFile(atPath: script.path, contents: Data(content.utf8), attributes: [.posixPermissions: 0o700]) else {
                 throw CustomCommandExecutionError.invalid("无法写入终端启动脚本。")
             }
@@ -214,6 +232,53 @@ final class CustomCommandExecutor {
             throw CustomCommandExecutionError.invalid("无法准备终端命令：\(error.localizedDescription) 请检查临时目录权限与磁盘空间。")
         }
         return script
+    }
+
+    private func prepareDirectoryStartup(directory: URL, temporaryDirectory: URL) throws -> String {
+        let files = [".zshenv", ".zprofile", ".zshrc", ".zlogin"]
+        let cleanup = files.map { Self.shellQuote(temporaryDirectory.appendingPathComponent($0).path) }.joined(separator: " ")
+        let finish = """
+        unset FROG_DIRECTORY_ZDOTDIR_SET FROG_DIRECTORY_ZDOTDIR
+        /bin/rm -f -- \(cleanup)
+        /bin/rmdir -- \(Self.shellQuote(temporaryDirectory.path))
+        builtin cd -- \(Self.shellQuote(directory.path)) || { printf '%s\\n' '无法进入工作目录，请检查目录是否存在及访问权限。' >&2; exit 1; }
+        """
+        // Forward each startup phase in the same shell, then cd after the last user startup file.
+        for file in files {
+            let restoreAndSource = """
+            if [[ $FROG_DIRECTORY_ZDOTDIR_SET == 1 ]]; then
+                export ZDOTDIR="$FROG_DIRECTORY_ZDOTDIR"
+            else
+                unset ZDOTDIR
+            fi
+            [[ ! -r "${ZDOTDIR-$HOME}/\(file)" ]] || builtin source "${ZDOTDIR-$HOME}/\(file)"
+            """
+            let continuation = file == ".zlogin" ? finish : """
+            if [[ ! -o rcs ]]\(file == ".zshrc" ? " || [[ ! -o login ]]" : ""); then
+                \(finish)
+            else
+                FROG_DIRECTORY_ZDOTDIR_SET=${+ZDOTDIR}
+                FROG_DIRECTORY_ZDOTDIR=${ZDOTDIR-}
+                export ZDOTDIR=\(Self.shellQuote(temporaryDirectory.path))
+            fi
+            """
+            let bytes = Data((restoreAndSource + "\n" + continuation + "\n").utf8)
+            guard FileManager.default.createFile(atPath: temporaryDirectory.appendingPathComponent(file).path,
+                                                 contents: bytes, attributes: [.posixPermissions: 0o600]) else {
+                throw CustomCommandExecutionError.invalid("无法写入目录启动配置。")
+            }
+        }
+        return """
+        #!/bin/sh
+        /bin/rm -f -- \(Self.shellQuote(temporaryDirectory.appendingPathComponent("run.command").path))
+        if [ "${ZDOTDIR+x}" = x ]; then
+            export FROG_DIRECTORY_ZDOTDIR_SET=1 FROG_DIRECTORY_ZDOTDIR="$ZDOTDIR"
+        else
+            export FROG_DIRECTORY_ZDOTDIR_SET=0 FROG_DIRECTORY_ZDOTDIR=''
+        fi
+        export ZDOTDIR=\(Self.shellQuote(temporaryDirectory.path))
+        exec /bin/zsh -il
+        """ + "\n"
     }
 
     nonisolated static func arguments(template: String, input: String) throws -> [String] {

@@ -1,19 +1,20 @@
 import Foundation
 
 public enum CustomCommandKind: String, Codable, CaseIterable, Sendable {
-    case terminal, program, url
+    case terminal, program, url, directory
 
     public var label: String {
         switch self {
         case .terminal: "终端命令"
         case .program: "程序 / 脚本"
         case .url: "网址"
+        case .directory: "打开目录"
         }
     }
 }
 
 public enum CustomCommandTerminal: String, Codable, CaseIterable, Sendable {
-    case terminal, iTerm2, ghostty, none
+    case terminal, iTerm2, ghostty, none, finder
 
     public var label: String {
         switch self {
@@ -21,6 +22,7 @@ public enum CustomCommandTerminal: String, Codable, CaseIterable, Sendable {
         case .iTerm2: "iTerm2"
         case .ghostty: "Ghostty"
         case .none: "不使用终端"
+        case .finder: "Finder"
         }
     }
 }
@@ -76,8 +78,12 @@ public struct CustomCommand: Codable, Equatable, Identifiable, Sendable {
         guard !reservedNames.contains(where: { $0.lowercased() == result.name }) else {
             throw CustomCommandError.invalidData("该名称由内置命令保留，请换一个名称。")
         }
-        guard !result.title.isEmpty, !result.target.isEmpty else {
-            throw CustomCommandError.invalidData("名称与执行内容不能为空。")
+        guard !result.title.isEmpty, type == .directory || !result.target.isEmpty else {
+            throw CustomCommandError.invalidData(type == .directory ? "名称不能为空。" : "名称与执行内容不能为空。")
+        }
+        if type == .directory {
+            result.target = ""
+            result.arguments = ""
         }
         if type != .url {
             guard result.directory.hasPrefix("/") || result.directory.hasPrefix("~/") else {
@@ -89,8 +95,11 @@ public struct CustomCommand: Codable, Equatable, Identifiable, Sendable {
                 throw CustomCommandError.invalidData("程序或脚本请填写绝对路径或 ~/ 开头的路径。")
             }
         }
-        if type == .terminal && terminal == .none {
+        if (type == .terminal || type == .directory) && terminal == .none {
             throw CustomCommandError.invalidData("终端命令必须选择可用的终端应用。")
+        }
+        if terminal == .finder && type != .directory {
+            throw CustomCommandError.invalidData("Finder 仅用于打开目录。")
         }
         if type == .url {
             let template = result.target.replacingOccurrences(of: "{query}", with: "query")

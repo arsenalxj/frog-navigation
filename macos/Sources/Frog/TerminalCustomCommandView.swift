@@ -98,10 +98,10 @@ extension LauncherView {
                     drawCustomSelection(y: y, selected: selected)
                     let value = model.customValue(field, command: command)
                     D.text(String(format: "%02d", index + 1), left, y, size: 10, color: selected ? D.yellow : D.muted)
-                    D.text(field.label, 100, y, size: 11, color: selected ? D.mint : D.muted, maxWidth: 160)
+                    D.text(model.customFieldLabel(field, command: command), 100, y, size: 11, color: selected ? D.mint : D.muted, maxWidth: 160)
                     D.text(value.isEmpty ? "（未填写）" : value, 272, y, size: 12.5, color: selected ? D.paper : D.ink, maxWidth: 966)
                     if field.isOption { D.text("←→ / 空格改值", right, y, size: 10.5, color: selected ? D.mint : D.muted, align: .right) }
-                    hit(NSRect(x: 64, y: y - 11, width: 1312, height: 22), field.label + "：" + value, .custom(.field(index)), selected: selected)
+                    hit(NSRect(x: 64, y: y - 11, width: 1312, height: 22), model.customFieldLabel(field, command: command) + "：" + value, .custom(.field(index)), selected: selected)
                     if field == .directory {
                         let badge = model.customDirectoryBrowsing ? "浏览中 · Esc 退出" : "Enter 浏览目录"
                         D.text(badge, right, y, size: 10.5,
@@ -140,11 +140,13 @@ extension LauncherView {
                 ? "浏览目录：↑↓ 移动 · Tab 选择并进入 · ⇧Tab 上一级 · Enter 退出浏览（保留当前路径）"
                 : model.isCustomDirectoryEditing
                 ? "相对路径基准：\(model.customDirectoryBase.path) · ↑↓ 切字段 · Enter 浏览目录 · ⌘Enter 保存"
+                : model.customDraft?.type == .directory
+                ? "打开目录：选择 Finder 打开文件夹，或选择终端进入目录并保持可输入 · ⌘Enter 保存"
                 : "↑↓ 切换字段 · ←→ / 空格改值 · Enter 下一项 · ⌘Enter 保存 · 参数 {args} / 网址 {query}"
         case .delete: note = "仅删除命令配置，不删除目标文件 · n / Enter / Esc 取消"
         case .execution: note = model.customExecuting
-                ? "后台程序运行中 · Esc 终止 · 其余终端／浏览器只报告启动交接"
-                : "终端 / 浏览器只报告启动交接；实际命令错误留在终端 · 无终端程序显示退出状态与输出"
+                ? "后台程序运行中 · Esc 终止 · 其余终端／浏览器／Finder 只报告启动交接"
+                : "终端 / 浏览器 / Finder 只报告启动交接；实际命令错误留在终端 · 无终端程序显示退出状态与输出"
         }
         D.text(note, left, 726, size: 10, color: D.muted, maxWidth: right - left)
     }

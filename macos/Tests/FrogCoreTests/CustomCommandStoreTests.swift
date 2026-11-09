@@ -39,7 +39,10 @@ final class CustomCommandStoreTests: XCTestCase {
         let commands = [
             CustomCommand(name: " Work ", title: " 工作 ", directory: " ~/Documents ", target: " pwd ", arguments: " {args} ", terminal: .iTerm2),
             CustomCommand(name: "editor", title: "编辑器", type: .program, directory: "/tmp", target: "/usr/bin/open", arguments: "-a TextEdit {args}", terminal: .none),
-            CustomCommand(name: "search", title: "搜索", type: .url, directory: "", target: "https://example.com/?q={query}", terminal: .none)
+            CustomCommand(name: "search", title: "搜索", type: .url, directory: "", target: "https://example.com/?q={query}", terminal: .none),
+            CustomCommand(name: "folder", title: "打开项目", type: .directory, directory: "/tmp", target: "", terminal: .terminal),
+            CustomCommand(name: "converted", title: "旧脚本转目录", type: .directory, directory: "/tmp", target: "pwd", arguments: "{args}", terminal: .ghostty),
+            CustomCommand(name: "finder-folder", title: "项目目录", type: .directory, directory: "/tmp", target: "", terminal: .finder)
         ]
         try await store.save(commands, reservedNames: [])
         let restored = try await CustomCommandStore(directory: directory).load(reservedNames: [])
@@ -47,7 +50,14 @@ final class CustomCommandStoreTests: XCTestCase {
         XCTAssertEqual(restored[0].id, "work")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         XCTAssertEqual(json["schemaVersion"] as? Int, 1)
-        XCTAssertEqual((json["commands"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual((json["commands"] as? [[String: Any]])?.count, 6)
+        XCTAssertEqual(restored[3].type, .directory)
+        XCTAssertEqual(restored[3].target, "")
+        XCTAssertEqual(restored[4].target, "")
+        XCTAssertEqual(restored[4].arguments, "")
+        XCTAssertEqual(restored[5].type, .directory)
+        XCTAssertEqual(restored[5].terminal, .finder)
+        XCTAssertEqual((json["commands"] as? [[String: Any]])?[5]["terminal"] as? String, "finder")
     }
 
     func testSaveRequiresSuccessfulLoad() async throws {
@@ -177,6 +187,38 @@ final class CustomCommandStoreTests: XCTestCase {
             draft.target = target
             XCTAssertThrowsError(try draft.validated(reservedNames: []), target)
         }
+    }
+
+    func testFinderIsRejectedForEveryNonDirectoryKind() throws {
+        for (kind, target) in [(CustomCommandKind.terminal, "pwd"), (.program, "/bin/pwd"), (.url, "https://example.com/")] {
+            var draft = CustomCommand(name: "invalid-finder", title: "项目", type: kind,
+                                      directory: "/tmp", target: target, terminal: .terminal)
+            XCTAssertNoThrow(try draft.validated(reservedNames: []))
+            draft.terminal = .finder
+            XCTAssertThrowsError(try draft.validated(reservedNames: [])) { error in
+                guard case CustomCommandError.invalidData = error else {
+                    return XCTFail("Expected invalidData for \(kind), got \(error)")
+                }
+            }
+        }
+    }
+
+    func testDirectoryCommandRejectsNoTerminalAndInvalidDirectoryWithoutReplacingSavedData() async throws {
+        let directory = try temporaryDirectory()
+        let store = CustomCommandStore(directory: directory)
+        _ = try await store.load(reservedNames: [])
+        let original = command()
+        try await store.save([original], reservedNames: [])
+        var draft = CustomCommand(name: "folder", title: "打开项目", type: .directory,
+                                  directory: directory.path, target: "", terminal: .none)
+        await assertSaveFails(store, commands: [draft])
+        draft.terminal = .terminal
+        for path in ["", "relative/path", "/tmp/\0invalid"] {
+            draft.directory = path
+            await assertSaveFails(store, commands: [draft])
+        }
+        let restored = try await CustomCommandStore(directory: directory).load(reservedNames: [])
+        XCTAssertEqual(restored, [original])
     }
 
     func testDuplicateCollectionAndReservedNamesNeverReachDisk() async throws {

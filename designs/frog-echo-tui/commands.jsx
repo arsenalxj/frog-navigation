@@ -1,6 +1,6 @@
 /* macOS 自定义命令交互原型；仅预览，不调用宿主机 shell。 */
 const FROG_COMMAND_STORAGE = "frog-echo-macos-commands-v1";
-const FROG_COMMAND_TYPES = { terminal: "终端命令", program: "程序 / 脚本", url: "网址" };
+const FROG_COMMAND_TYPES = { terminal: "终端命令", program: "程序 / 脚本", url: "网址", directory: "打开目录" };
 const FROG_COMMAND_SEEDS = [
   { name: "aiomp", title: "项目 OMP", type: "terminal", directory: "~/Documents/frog-navigation", target: "omp", args: "", terminal: "Terminal" },
   { name: "codefrog", title: "用 VS Code 打开项目", type: "program", directory: "~/Documents/frog-navigation", target: "/usr/bin/open", args: '-a "Visual Studio Code" .', terminal: "不使用终端" },
@@ -20,7 +20,9 @@ function frogCommandError(c, items, original) {
   const reserved = [...COMMANDS.map(c => c[0]), "commands", "a", "e", "r", "del", "mv", "b", "man", "map", "logs", "quit", "o", "md", "g", "calculator"];
   if (reserved.includes(c.name.toLowerCase())) return "该名称由内置命令保留，请换一个名称。";
   if (items.some(x => x.name !== original && x.name.toLowerCase() === c.name.toLowerCase())) return "命令名已存在，请换一个名称。";
-  if (!c.title.trim() || !c.target.trim()) return "名称与执行内容不能为空。";
+  if (!c.title.trim() || (c.type !== "directory" && !c.target.trim())) return "名称与执行内容不能为空。";
+  if (c.type === "directory" && !["Terminal", "iTerm2", "Finder"].includes(c.terminal)) return "打开目录必须选择终端或 Finder。";
+  if (c.type !== "directory" && c.terminal === "Finder") return "Finder 仅用于打开目录。";
   if (c.type !== "url" && !/^(\/|~\/)/.test(c.directory)) return "工作目录请填写绝对路径或 ~/ 开头的路径。";
   if (c.type === "url") {
     try { if (!["https:", "http:"].includes(new URL(c.target).protocol)) throw Error(); }
@@ -57,12 +59,13 @@ function FrogCommandDiscovery({ items, input, choose }) {
   </g>;
 }
 function FrogCommands({ items, saveItems, initialPreview, suspended, close, startCommand, storageError }) {
-  const [mode, setMode] = React.useState(initialPreview ? "preview" : "list");
+  const initialError = initialPreview?.command.type === "directory" && initialPreview.args.trim() ? "打开目录不接受运行参数。" : "";
+  const [mode, setMode] = React.useState(initialPreview && !initialError ? "preview" : "list");
   const [cursor, setCursor] = React.useState(0);
   const [draft, setDraft] = React.useState(null);
   const [original, setOriginal] = React.useState(null);
   const [field, setField] = React.useState(0);
-  const [error, setError] = React.useState(storageError || "");
+  const [error, setError] = React.useState(initialError || storageError || "");
   const [notice, setNotice] = React.useState("");
   const [preview, setPreview] = React.useState(initialPreview);
   const [query, setQuery] = React.useState("");
@@ -70,7 +73,7 @@ function FrogCommands({ items, saveItems, initialPreview, suspended, close, star
   const input = React.useRef(null);
   const filtered = items.filter(c => `${c.name} ${c.title}`.toLowerCase().includes(query.toLowerCase()));
   const selected = filtered[Math.min(cursor, Math.max(0, filtered.length - 1))];
-  const fields = draft ? [["name", "命令名"], ["title", "名称"], ["type", "动作类型"], ...(draft.type === "url" ? [] : [["directory", "工作目录"]]), ["target", draft.type === "url" ? "网址模板" : "执行内容"], ...(draft.type === "url" ? [] : [["args", "参数模板"], ["terminal", "终端"]])] : [];
+  const fields = draft ? [["name", "命令名"], ["title", "名称"], ["type", "动作类型"], ...(draft.type === "url" ? [] : [["directory", "工作目录"]]), ...(draft.type === "directory" ? [] : [["target", draft.type === "url" ? "网址模板" : "执行内容"]]), ...(["url", "directory"].includes(draft.type) ? [] : [["args", "参数模板"]]), ...(draft.type === "url" ? [] : [["terminal", draft.type === "directory" ? "打开方式" : "终端"]])] : [];
   const current = fields[field];
   const editingText = mode === "edit" && current && !["type", "terminal"].includes(current[0]);
   React.useEffect(() => {
@@ -86,6 +89,7 @@ function FrogCommands({ items, saveItems, initialPreview, suspended, close, star
   };
   const save = () => {
     const c = { ...draft, name: draft.name.trim().toLowerCase(), title: draft.title.trim(), directory: draft.directory.trim(), target: draft.target.trim() };
+    if (c.type === "directory") { c.target = ""; c.args = ""; }
     const issue = frogCommandError(c, items, original);
     if (issue) { setError(issue); return; }
     const next = original ? items.map(x => x.name === original ? c : x) : [...items, c];
@@ -95,11 +99,14 @@ function FrogCommands({ items, saveItems, initialPreview, suspended, close, star
   };
   const cycle = () => {
     const key = current[0];
-    const values = key === "type" ? Object.keys(FROG_COMMAND_TYPES) : draft.type === "program" ? ["不使用终端", "Terminal", "iTerm2"] : ["Terminal", "iTerm2"];
+    const values = key === "type" ? Object.keys(FROG_COMMAND_TYPES) : draft.type === "program" ? ["不使用终端", "Terminal", "iTerm2"] : draft.type === "directory" ? ["Terminal", "iTerm2", "Finder"] : ["Terminal", "iTerm2"];
     const value = values[(values.indexOf(draft[key]) + 1) % values.length];
-    setDraft({ ...draft, [key]: value, ...(key === "type" ? { terminal: value === "program" ? "不使用终端" : "Terminal" } : {}) });
+    setDraft({ ...draft, [key]: value, ...(key === "type" ? { terminal: value === "program" ? "不使用终端" : value === "url" ? "" : "Terminal" } : {}) });
   };
-  const showPreview = (c, args = "") => { setPreview({ command: c, args }); setMode("preview"); setError(""); };
+  const showPreview = (c, args = "") => {
+    if (c.type === "directory" && args.trim()) { setError("打开目录不接受运行参数。"); return; }
+    setPreview({ command: c, args }); setMode("preview"); setError("");
+  };
   React.useEffect(() => {
     if (suspended) return;
     const onKey = e => {
@@ -211,6 +218,8 @@ function FrogCommands({ items, saveItems, initialPreview, suspended, close, star
     })}
     {mode === "preview" && (preview.command.type === "url" ? [
       ["打开方式", "默认浏览器"], ["目标网址", preview.command.target.replaceAll("{query}", encodeURIComponent(preview.args))],
+    ] : preview.command.type === "directory" ? [
+      ["工作目录", preview.command.directory], ["打开方式", preview.command.terminal], ["执行说明", preview.command.terminal === "Finder" ? "使用 Finder 打开目录内容，不定位父目录，不启动 shell" : "进入工作目录后启动交互式 shell，保持终端可继续输入"],
     ] : [
       ["工作目录", preview.command.directory], ["终端", preview.command.terminal], ["执行内容", preview.command.target], ["参数模板", preview.command.args || "（无）"], ["输入参数（数据）", preview.args || "（无）"],
     ]).map(([key, value], i) => {
@@ -225,8 +234,8 @@ function FrogCommands({ items, saveItems, initialPreview, suspended, close, star
     {error && <T x={X} y={BV.y + BV.h - 36} size={12} fill={COLOR.amber}>{error}</T>}
     {notice && <T x={X} y={BV.y + BV.h - (error ? 54 : 36)} size={12} fill={COLOR.green}>{notice}</T>}
     <T x={X} y={BV.y + BV.h - 10} size={10} fill={COLOR.muted}>
-      {mode === "edit" ? "Tab / Shift+Tab 切换字段 · 参数模板使用 {args}，网址使用 {query} · Esc 丢弃草稿"
-        : mode === "preview" ? "仅预览：未打开终端、未运行命令，也未检查目录或程序是否存在"
+      {mode === "edit" ? (draft.type === "directory" ? "Tab / Shift+Tab 切换字段 · 使用终端或 Finder 打开目录 · 不接受运行参数 · Esc 丢弃草稿" : "Tab / Shift+Tab 切换字段 · 参数模板使用 {args}，网址使用 {query} · Esc 丢弃草稿")
+        : mode === "preview" ? "仅预览：未打开终端或 Finder、未运行命令，也未检查目录或程序是否存在"
         : mode === "delete" ? "仅删除当前命令配置 · n / Esc 取消，不改变已有数据"
         : "↑↓ 选择 · 点击选中 / 双击编辑 · 本浏览器保存 · 原型不执行系统命令"}
     </T>
