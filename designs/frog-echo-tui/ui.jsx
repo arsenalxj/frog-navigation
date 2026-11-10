@@ -113,6 +113,7 @@ function CommandChrome({ s, act }) {
   const { x, y, w } = LAYOUT.cmd;
   const p = s.prompt;
   const input = s.input;
+  const identity = pageIdentity(s);
   let promptChar = "›", promptColor = COLOR.green, label = null, value = "", caret = true, right = null;
 
   if (p) {
@@ -126,7 +127,7 @@ function CommandChrome({ s, act }) {
       : { text: p.hint || "", kind: "info" };
   } else if (input) {
     promptChar = input.kind === "search" ? "/" : ":";
-    promptColor = input.kind === "search" ? COLOR.teal : COLOR.amber;
+    promptColor = input.kind === "search" ? (identity?.accent || COLOR.teal) : COLOR.amber;
     value = input.value;
     right = {
       text: input.kind === "search" ? (s.buffer === "commands" ? "Enter 确认筛选 · Esc 结束输入" : "Enter 打开 · Esc 清空") : "Tab 补全 · ↑↓ 选择 · ⌥↑↓ 历史 · Esc 取消",
@@ -134,7 +135,7 @@ function CommandChrome({ s, act }) {
     };
   } else if (s.buffer === "calc") {
     promptChar = "=";
-    promptColor = COLOR.green;
+    promptColor = identity?.accent || COLOR.green;
     label = "calc › 算式";
     value = s.calc.expr;
     right = s.calc.copied
@@ -155,7 +156,9 @@ function CommandChrome({ s, act }) {
     <g onClick={() => act.focusInput()} style={{ cursor: "text" }}>
       {/* 整条命令行都是回焦命中区，点标签或提示文字也不会丢失输入焦点。 */}
       <R x={x} y={y} w={w} h={LAYOUT.cmd.h} fill="transparent" />
-      {p && <R x={x} y={y} w={w} h={LAYOUT.cmd.h} fill={COLOR.surface} opacity={0.7} />}
+      {identity && <R x={x} y={y} w={w} h={LAYOUT.cmd.h} fill={identity.band} />}
+      {identity && <R x={x} y={y} w={5} h={LAYOUT.cmd.h} fill={identity.accent} />}
+      {p && !identity && <R x={x} y={y} w={w} h={LAYOUT.cmd.h} fill={COLOR.surface} opacity={0.7} />}
       {p && <R x={x} y={y} w={3} h={LAYOUT.cmd.h} fill={COLOR.yellow} />}
       <L x1={x} y1={y} x2={x + w} y2={y} stroke={COLOR.line} />
       <T x={x + LAYOUT.margin} y={y + 21} size={17} weight={700} fill={promptColor}>{promptChar}</T>
@@ -171,7 +174,7 @@ function CommandChrome({ s, act }) {
         {caret && <Caret x={inputX + textW(value.slice(0, selStart), 15.5)} y={y + 21} h={18}
                          w={calcMode ? textW("0", 15.5) : 7} />}
         {placeholder && (
-          <T x={inputX + 16} y={y + 21} size={14} fill={COLOR.muted} opacity={0.8}>{placeholder}</T>
+          <T x={inputX + 16} y={y + 21} size={14} fill={COLOR.muted} opacity={identity ? 1 : 0.8}>{placeholder}</T>
         )}
       </g>
       {right && (
@@ -184,6 +187,7 @@ function CommandChrome({ s, act }) {
 
 function StatusChrome({ s, ctx }) {
   const { x, y, w, h } = LAYOUT.status;
+  const identity = pageIdentity(s);
   const mode = s.prompt ? "PROMPT"
     : s.input ? (s.input.kind === "search" ? "SEARCH" : "COMMAND")
     : s.buffer ? `BUFFER:${s.buffer.toUpperCase()}`
@@ -194,11 +198,11 @@ function StatusChrome({ s, ctx }) {
     : "NORMAL";
   const count = ctx ? ctx.items.length : 0;
   const pos = count ? `${Math.min(s.cursor + 1, count)}/${count}` : "0/0";
-  const modeW = textW(mode, 12.5) + 48;
+  const modeW = textW(identity ? identity.label + " · " + mode : mode, 12.5) + 48;
   return (
     <g>
       <R x={x} y={y} w={w} h={h} fill={COLOR.forest} />
-      <T x={x + LAYOUT.margin} y={y + 19.5} size={12.5} weight={700} fill={COLOR.yellow} spacing={1.2}>{mode}</T>
+      <T x={x + LAYOUT.margin} y={y + 19.5} size={12.5} weight={700} fill={COLOR.yellow} spacing={1.2}>{identity ? identity.label + " · " + mode : mode}</T>
       {!["settings", "calc", "commands"].includes(s.buffer) && (
         <T x={x + LAYOUT.margin - 16 + modeW} y={y + 19.5} size={12.5} fill={COLOR.paper} opacity={0.82}>
           · {s.query ? `“${s.query}”` : ctx.folderName} · {pos}

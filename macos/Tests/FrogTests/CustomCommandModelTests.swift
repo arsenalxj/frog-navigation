@@ -189,10 +189,35 @@ final class CustomCommandModelTests: XCTestCase {
         let payload = "中文 ' ; $(touch injected) & \" x"
         model.updateInput("literal " + payload)
         model.submitInput()
+        XCTAssertEqual(model.buffer, .commands)
+        XCTAssertEqual(model.customScreen, .execution)
         try await wait { !model.customExecuting }
         XCTAssertEqual(model.customExecutionOutput, [payload])
         XCTAssertFalse(model.customExecutionFailed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: model.store.directory.appendingPathComponent("injected").path))
+    }
+
+    func testHomeCommandExecutionPreservesPageOnSuccessAndFailure() async throws {
+        let model = try await model()
+        try await add(model)
+        model.escape()
+        XCTAssertNil(model.buffer)
+        for (name, target, fails) in [("literal", "/usr/bin/printf", false),
+                                      ("missing", model.store.directory.appendingPathComponent("missing").path, true)] {
+            model.customCommands = [CustomCommand(name: name, title: "直接执行", type: .program,
+                                                 directory: model.store.directory.path, target: target,
+                                                 arguments: "'%s' {args}", terminal: .none)]
+            model.startCommand()
+            model.updateInput(name + " 首页执行")
+            model.submitInput()
+            XCTAssertNil(model.buffer)
+            XCTAssertEqual(model.customScreen, .list)
+            XCTAssertNil(model.inputKind)
+            try await wait { !model.customExecuting }
+            XCTAssertNil(model.buffer)
+            XCTAssertEqual(model.customExecutionFailed, fails)
+            if !fails { XCTAssertEqual(model.customExecutionOutput, ["首页执行"]) }
+        }
     }
     func testDeleteCancellationAndConfirmationAffectOnlyConfiguration() async throws {
         let model = try await model()
@@ -477,6 +502,36 @@ final class CustomCommandModelTests: XCTestCase {
         try await wait { !model.customExecuting }
         XCTAssertTrue(model.customExecutionFailed)
         XCTAssertNotNil(model.customExecutionCommand)
+    }
+
+    func testHomeProgramCanBeCancelledFromCommandsAndNextCommandRuns() async throws {
+        let model = try await model()
+        let slow = CustomCommand(name: "slow", title: "长任务", type: .program,
+                                 directory: model.store.directory.path, target: "/bin/sleep",
+                                 arguments: "30", terminal: .none)
+        let next = CustomCommand(name: "next", title: "下一条", type: .program,
+                                 directory: model.store.directory.path, target: "/usr/bin/printf",
+                                 arguments: "done", terminal: .none)
+        model.customCommands = [slow, next]
+        defer { if model.customExecuting { model.customExecutor.cancelRunningProgram() } }
+        model.runCommand("slow")
+        XCTAssertNil(model.buffer)
+        XCTAssertTrue(model.customExecuting)
+        model.runCommand("commands")
+        XCTAssertEqual(model.buffer, .commands)
+        XCTAssertEqual(model.customScreen, .execution)
+        XCTAssertEqual(model.customExecutionCommand?.name, "slow")
+        XCTAssertEqual(model.bufferOffset, 0)
+        XCTAssertTrue(model.handleKey(try event(53), isTextEditing: false))
+        try await wait { !model.customExecuting }
+        XCTAssertTrue(model.customExecutionFailed)
+        model.runCommand("next")
+        try await wait { !model.customExecuting }
+        XCTAssertEqual(model.customExecutionCommand?.name, "next")
+        XCTAssertEqual(model.customExecutionOutput, ["done"])
+        XCTAssertFalse(model.customExecutionFailed)
+        model.runCommand("commands")
+        XCTAssertEqual(model.customScreen, .list)
     }
 
     func testPathChoicesListTypedDotDirectory() async throws {

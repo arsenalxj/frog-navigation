@@ -44,7 +44,7 @@ function frogTileColor(id) {
 const LAYOUT = {
   W: 1440,
   H: 900,
-  cmd:    { x: 0, y: 752, w: 1440, h: 40 },
+  cmd:    { x: 0, y: 752, w: 1440, h: 44 },
   status: { x: 0, y: 796, w: 1440, h: 36 },
   hintY:  856,
   list:   { x: 40, y: 24, w: 1360, h: 600 },

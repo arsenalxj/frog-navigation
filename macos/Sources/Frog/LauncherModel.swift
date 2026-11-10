@@ -684,7 +684,11 @@ final class LauncherModel: ObservableObject {
         if inputKind == .search {
             switch event.keyCode {
             case 36, 76: submitInput(); return true
-            case 125, 126: moveCursor(event.keyCode == 125 ? 1 : -1); return true
+            case 48: selectItem(at: selectedIndex); return true
+            case 125, 126:
+                moveCursor(event.keyCode == 125 ? 1 : -1)
+                selectItem(at: selectedIndex)
+                return true
             default: return false
             }
         }

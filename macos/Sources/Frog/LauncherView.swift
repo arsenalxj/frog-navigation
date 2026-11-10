@@ -99,7 +99,13 @@ final class LauncherView: NSView, NSTextFieldDelegate {
     private var commandHint: String {
         if let prompt = model.prompt { return prompt.error ?? prompt.hint }
         switch model.inputKind {
-        case .search: return model.buffer == .commands ? "Enter 确认筛选 · Esc 结束输入" : "Enter 打开 · Esc 清空"
+        case .search:
+            if model.buffer == .commands { return "Enter 确认筛选 · Esc 结束输入" }
+            if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "↑↓ / Tab 操作结果 · Enter 结束搜索 · Esc 退出"
+            }
+            if model.items.isEmpty { return "Enter 打开网址 / 网页搜索 · Esc 清空" }
+            return "↑↓ / Tab 操作结果 · Enter 打开 · Esc 清空"
         case .command: return "Tab 补全 · ↑↓ 选择 · ⌥↑↓ 历史 · Esc 取消"
         case .calc: return model.calcFeedback ?? "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭"
         default: return ""
@@ -522,14 +528,26 @@ final class LauncherView: NSView, NSTextFieldDelegate {
 
     private func drawChrome() {
         typealias D = TerminalDrawing
+        let page: (name: String, background: NSColor, accent: NSColor)?
+        switch model.buffer {
+        case nil: page = ("主界面", D.bookmarkInput, D.green)
+        case .commands: page = ("自定义命令", D.commandInput, D.blue)
+        case .calc: page = ("计算器", D.calculatorInput, D.amber)
+        default: page = nil
+        }
+        if let page {
+            D.rect(NSRect(x: 0, y: 752, width: 1440, height: 44), page.background)
+            D.rect(NSRect(x: 0, y: 752, width: 5, height: 44), page.accent)
+        } else if model.prompt != nil {
+            D.rect(NSRect(x: 0, y: 752, width: 1440, height: 44), D.surface)
+        }
         if model.prompt != nil {
-            D.rect(NSRect(x: 0, y: 752, width: 1440, height: 40), D.surface)
-            D.rect(NSRect(x: 0, y: 752, width: 3, height: 40), D.yellow)
+            D.rect(NSRect(x: 0, y: 752, width: 3, height: 44), D.yellow)
         }
         D.rule(0, 752, 1440)
         let isCalc = model.buffer == .calc && model.inputKind == .calc
         let symbol = isCalc ? "=" : model.inputKind == .search ? "/" : model.inputKind != nil || model.prompt != nil ? ":" : "›"
-        let symbolColor = isCalc ? D.green : model.inputKind == .search ? D.teal
+        let symbolColor = isCalc ? D.amber : model.inputKind == .search ? (page?.accent ?? D.teal)
             : model.inputKind != nil || model.prompt != nil ? D.amber : D.green
         D.text(symbol, 40, 773, size: 17, color: symbolColor, bold: true)
         if let prompt = model.prompt { D.text(prompt.label, 58, 773, size: 13, color: D.muted, maxWidth: inputX - 70) }
@@ -546,11 +564,13 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             let hintColor: NSColor = model.prompt?.error != nil ? D.red
                 : isCalc && model.calcFeedback != nil ? D.level(model.calcFeedbackLevel) : D.muted
             D.text(commandHint, 1400, 773, size: 12, color: hintColor, maxWidth: hintWidth, align: .right)
-            hit(NSRect(x: 1400 - hintWidth, y: 752, width: hintWidth, height: 40), commandHint, .input)
+            hit(NSRect(x: 1400 - hintWidth, y: 752, width: hintWidth, height: 44), commandHint, .input)
         }
-        hit(NSRect(x: 40, y: 752, width: 1360 - hintWidth - 24, height: 40), "命令行输入", .input)
+        hit(NSRect(x: 40, y: 752, width: 1360 - hintWidth - 24, height: 44), "命令行输入", .input)
         D.rect(NSRect(x: 0, y: 796, width: 1440, height: 36), D.forest)
-        D.text(model.modeLabel, 40, 815.5, size: 12.5, color: D.yellow, bold: true, maxWidth: 800)
+        let modeLabel = model.modeLabel
+        let statusLabel = page.map { $0.name + " · " + modeLabel } ?? modeLabel
+        D.text(statusLabel, 40, 815.5, size: 12.5, color: D.yellow, bold: true, maxWidth: 800)
         if model.buffer == nil {
             let status: String?
             if !model.query.isEmpty {
@@ -561,7 +581,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                 status = nil
             }
             if let status {
-                let x = 72 + D.width(model.modeLabel, size: 12.5, bold: true)
+                let x = 72 + D.width(statusLabel, size: 12.5, bold: true)
                 D.text("· \(status)", x, 815.5, size: 12.5,
                        color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
             }
@@ -637,7 +657,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             return
         }
         if model.inputKind == .search {
-            if !model.items.isEmpty { key("↑↓", "选择结果") }
+            if !model.items.isEmpty { key("↑↓ / Tab", "进入结果操作") }
             key("Enter", model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "结束搜索"
                 : model.items.isEmpty ? "打开网址 / 网页搜索" : "打开结果")
             key("Esc", "清空并退出搜索")
@@ -690,14 +710,19 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         } else if searching {
             key("Enter", "打开网址 / 网页搜索")
         }
-        if !searching, !model.document.groups.isEmpty {
+        if searching {
+            key("/", "继续搜索")
+            key("Esc", "清空搜索")
+            return
+        }
+        if !model.document.groups.isEmpty {
             let allExpanded = model.document.groups.allSatisfy { model.expandedGroupIDs.contains($0.id) }
             key("z", allExpanded ? "全部折叠" : "全部展开")
         }
         if !model.isOrganizing {
             key("a", "添加")
             key("n", "新建文件夹")
-            if !searching { key("o", "排序整理") }
+            key("o", "排序整理")
         }
         key("/", "搜索")
         key(":", "命令")

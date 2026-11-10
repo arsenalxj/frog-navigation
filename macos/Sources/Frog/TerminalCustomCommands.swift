@@ -246,9 +246,9 @@ extension LauncherModel {
         buffer = .commands
         bufferOffset = 0
         inputKind = nil
-        customScreen = .list
+        customScreen = customExecuting ? .execution : .list
         customFeedback = nil
-        clampCustomSelection()
+        if customScreen == .list { clampCustomSelection() }
     }
 
     func customValue(_ field: CustomCommandField, command: CustomCommand) -> String {
@@ -439,11 +439,12 @@ extension LauncherModel {
             commandError(customExecuting ? "已有自定义命令正在执行，请等待该进程结束。" : "自定义命令配置尚未就绪。")
             return
         }
-        buffer = .commands
         inputKind = nil
         prompt = nil
-        customScreen = .execution
-        bufferOffset = 0
+        if buffer == .commands {
+            customScreen = .execution
+            bufferOffset = 0
+        }
         customExecutionCommand = command
         customExecutionInput = input
         customExecutionSummary = "正在启动…"

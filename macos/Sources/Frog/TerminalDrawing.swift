@@ -7,6 +7,8 @@ enum TerminalDrawing {
     static let green = color(0x0D5E3A), pine = color(0x2E4B26), purple = color(0x7E1671)
     static let blue = color(0x1661AB), teal = color(0x126E82), red = color(0x7C1823), amber = color(0x862617)
     static let yellow = color(0xE6C24D), lemon = color(0xF8DF72), mint = color(0xADD5A2), forest = color(0x1A3B2E)
+    // 传统色色库：498 艾背绿、368 远天蓝、002 杏仁黄。
+    static let bookmarkInput = color(0xDFECD5), commandInput = color(0xD0DFE6), calculatorInput = color(0xF7E8AA)
     static let tiles = [green, purple, blue, red, amber, teal, pine, forest]
     private struct FontKey: Hashable { let size: CGFloat; let bold: Bool }
     private static var fonts: [FontKey: NSFont] = [:]

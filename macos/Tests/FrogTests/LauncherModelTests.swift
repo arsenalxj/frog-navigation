@@ -343,6 +343,42 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.selectedIndex, 1)
     }
 
+    func testSearchKeyboardSelectionEnablesBookmarkActionsAndResumesQuery() async throws {
+        let document = fixture(count: 3)
+        let model = try await makeModel(document)
+        for (code, index) in [(UInt16(48), 0), (UInt16(125), 1), (UInt16(126), 0)] {
+            for (letter, command) in [("e", "edit"), ("m", "move"), ("D", "delete")] {
+                model.startSearch()
+                model.updateInput("example.com")
+                XCTAssertFalse(model.handleKey(try key(14, "e"), isTextEditing: true))
+                XCTAssertTrue(model.handleKey(try key(code), isTextEditing: true))
+                XCTAssertNil(model.inputKind)
+                XCTAssertEqual(model.query, "example.com")
+                XCTAssertEqual(model.selectedIndex, index)
+                XCTAssertTrue(model.handleKey(try key(0, letter, modifiers: letter == "D" ? .shift : []), isTextEditing: false))
+                XCTAssertEqual(model.prompt?.command, command)
+                XCTAssertEqual(model.draft.id, document.bookmarks[index].id)
+                model.escape()
+                XCTAssertEqual(model.query, "example.com")
+                XCTAssertTrue(model.handleKey(try key(44, "/"), isTextEditing: false))
+                XCTAssertEqual(model.inputKind, .search)
+                XCTAssertEqual(model.inputText, "example.com")
+            }
+        }
+    }
+
+    func testEmptySearchResultsKeepInputWhenNavigating() async throws {
+        let model = try await makeModel(fixture(count: 1))
+        model.startSearch()
+        model.updateInput("no-match")
+        for code: UInt16 in [48, 125, 126] {
+            XCTAssertTrue(model.handleKey(try key(code), isTextEditing: true))
+            XCTAssertEqual(model.inputKind, .search)
+            XCTAssertEqual(model.query, "no-match")
+            XCTAssertNil(model.prompt)
+        }
+    }
+
     func testSearchIncludesGroupLabelsAndNoFakeAddResult() async throws {
         let group = BookmarkGroup(name: "工作")
         let bookmark = Bookmark(title: "查找我", url: "https://needle.example", groupId: group.id)
