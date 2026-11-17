@@ -2,6 +2,60 @@
 
 内部身份已统一为 Frog。旧身份的原始验收记录归档到项目同级 `frog-navigation-history/20260915-051305/`，不作为本次身份变更的验证结果。
 
+## 自定义命令操作统一到底部（2026-11-17）
+
+- 自定义命令列表、搜索、编辑、选项字段、目录浏览、删除、执行及停止确认统一使用主界面同一底部绘制方法，起点 `x=40`、基线 `y=856`，键帽、字体、间距一致。已有操作仍可点击，不新增菜单或业务操作。
+- 删除顶部操作行、字段右侧快捷键／浏览入口、目录区导航提示和任务行停止按钮的旧绘制及命中区；内容、字段／目录行选择、任务状态和查看结果入口保留。通用命令输入与文件提示继续使用统一底部提示。
+- `swift test --filter 'CustomCommandModelTests|LauncherModelTests'`：**87 项通过，0 失败**。
+- 独立 AppKit 验收覆盖 **17 个界面状态、118 项断言（含每个操作的底部位置和不重叠检查）**。实际鼠标点击底部搜索、进列表、复制、副本、编辑、目录浏览／采纳、保存、删除取消、运行、返回、停止／取消／确认、新增；验证键盘 Tab、删除与 Esc 保持原行为。旧顶部操作位置和旧停止按钮位置不再触发操作。
+- 截图核验列表、编辑、目录浏览、停止确认及 1000×625 缩放；所有操作点击区位于 `y=845..867` 且不越界。证据为 `build/command-footer-smoke/` 下 `checks.json`、`tests.log`、`native.log` 和 17 张 PNG。使用隔离配置、真实 printf/sleep 进程与原生字段编辑器，剪贴板按归属恢复；未改正式数据。事件为进程内调用而非系统物理注入，临时源码和可执行文件已清理。
+- 已重新构建固定签名 arm64 Release，并校验 ZIP 实际解压后的签名与内容一致性。产物 `build/青蛙导航.app`、`build/青蛙导航-macOS-arm64.zip`；构建日志 `build/build-release-20261117-144657.log`，包校验 `build/command-footer-smoke/package-verification.log`。ZIP SHA-256：`9ba5af8817ac0127cbe437238fcbc2c4ed4b62bddc0f793c1f686a0bfcd9533f`。未安装、未提交或推送。
+
+- 随后按用户授权替换 `/Applications/青蛙导航.app`。安装脚本完成旧版 ZIP 实际校验归档、正式包严格签名校验及系统注册刷新；旧版保留为 `build/install-backup/Frog-previous.zip`。正式版与本次构建二进制 SHA-256 一致：`90200172ee7ea8c9caac9a57f76151bb18af931653d65afd9565ae9823b66ff4`，架构为 arm64，签名仍绑定原固定证书 `05A2A276A653099A94D2D9E5E343EDB4FED2ECDD`。未自动启动正式应用、未修改正式数据。
+
+## 快捷键提示去重与精简（2026-11-17）
+
+- 按精简方案移除输入行右侧快捷键串、占宽及重复命中区，原生输入延伸至右侧边界。主界面提示区仅保留关联字段、候选、错误及删除／恢复风险；无内容时不画空框。编辑状态栏不再显示底层搜索信息，状态栏不再重复命令与返回提示。
+- 主界面与 calc 底部仅显示当前必要操作及主键；calc 的复制反馈移至结果区，标题和历史区不再重复教程。自定义命令保留原有操作行、选项字段与浏览目录点击入口，缩短按钮文字，移除重复页脚及确认正文中的键位；通用命令／文件提示仍有相应提示。没有新增菜单、按钮、模式或键位，没有修改按键路由。
+- `swift test --filter 'LauncherModelTests|CustomCommandModelTests|BookmarkKeyboardTests'`：**95 项通过，0 失败**。
+- 原生 AppKit 验收覆盖 **18 个截图状态、102 项断言（含各状态的布局边界检查）**：编辑／搜索、长网址及 1000×625 窗口缩放、字段错误、恢复备份风险、calc 结果／历史、自定义命令列表／编辑／目录／删除／搜索、通用文件提示、停止确认、设置和帮助。验证每个状态只有一个完整输入行命中区，输入框使用释放的右侧空间。
+- 实际操作验证原生搜索输入、预填退格、历史回焦和复制反馈；鼠标验证原复制、副本、取消、编辑、保存、目录浏览／采纳、删除取消、搜索进列表、运行、停止取消与确认入口。使用真实隔离 printf/sleep 进程与存储，剪贴板按归属恢复；未改正式数据。事件为进程内路由／原生控件调用，不是系统物理键鼠注入。
+- 证据：`build/shortcut-hints-smoke/` 下 `tests.log`、`checks.json`、`native.log` 和 18 张 PNG。已人工核对编辑、搜索、calc、自定义命令、目录、恢复风险、停止确认及缩放截图；临时源码和可执行文件已清理。
+- 已重新打包 `build/青蛙导航.app`、`build/青蛙导航-macOS-arm64.zip`；固定证书、arm64、ZIP 解压后严格签名与内容一致性校验通过。构建日志 `build/build-release-20261117-142827.log`，包校验 `build/shortcut-hints-smoke/package-verification.log`。ZIP SHA-256：`31b5efb90601d506c4cfbf92e4a7daffc235345296037a74b539424e44fd8f57`。未安装、未提交、未推送。
+
+## 键盘代码审查六项修复（2026-11-17）
+
+- 固定自定义命令删除确认目标：请求时保存目标快照，确认、标题和正文共用该身份；隐藏窗口导致筛选/游标重置也不会改删其他命令，取消或保存成功时清理目标。
+- 目录浏览中点击底部路径会取消未采纳选择、收起候选并恢复原生编辑器。停止确认精确放行 ⌘Q/⌘H，仍阻止 ⌘N、设置等穿透确认的操作。
+- 帮助、设置、日志、任务缓冲区直接显示命令错误；下一条命令或离开页面清除即时反馈。`:group` 的根目录/命名文件夹两条成功路径清理旧来源；空搜索 Enter 行为与两处提示共用动作判断。
+- `swift test --filter 'LauncherModelTests|CustomCommandModelTests|BookmarkKeyboardTests'`：**95 项通过，0 失败**。新增回归覆盖无筛选/有筛选的删除确认隐藏往返及磁盘目标、原生菜单键放行和确认屏障、目录点击回焦、两种 group 返回路径、辅助页错误反馈生命周期。
+- 独立 AppKit 窗口 **18 项检查通过**：真实字段编辑器、鼠标命中区、截图与隔离命令存储，覆盖删除第二条后隐藏重开仍正确删除、点击路径后可真实输入、帮助/设置顶部错误可见、空/空白搜索 Enter 结束输入、设置 Esc 回正确主界面。运行真实 `/bin/sleep`，停止确认中 ⌘H 经原生菜单隐藏且任务继续，⌘Q 经原生菜单触发 applicationWillTerminate；验收退出时清理隔离进程与数据。
+- 证据：`build/review-fixes-smoke/` 下 `tests.log`、`checks.json`、`native.log`、场景 PNG。使用进程内事件而非系统物理键鼠注入；未访问正式数据。临时验收源码和可执行文件已清理，未重复运行 OCR 或无关全量测试。
+- 已重新构建固定签名 arm64 Release，产物 `build/青蛙导航.app`、`build/青蛙导航-macOS-arm64.zip`；ZIP 实际解压后严格签名与内容一致性校验通过。构建日志 `build/build-release-20261117-115648.log`，校验记录 `build/review-fixes-smoke/package-verification.log`。ZIP SHA-256：`5683471292aac9ebe47f88d9c730d4a346407032928614bfd3f8818fa77f6960`。未安装、未提交、未推送。
+
+## 自定义命令目录浏览与字段导航分离（2026-11-17）
+
+- 根据用户原生验收反馈修正：Tab/Shift+Tab 始终切下一／上一字段；工作目录用 ⌘↓ 或点击“浏览目录”显式打开候选。Enter 采纳后收起候选、恢复路径字段编辑器，随后一次 Tab 直达下一字段。Esc 取消浏览；候选中 Tab/Shift+Tab 关闭浏览并切字段，不采纳高亮项。
+- 路径输入不自动读取或展示目录候选；收起时取消读取并清空候选，过期异步结果不能重新打开候选区。方案与使用说明同步采用新契约。
+- `swift test --filter 'CustomCommandModelTests|GlobalHotKeyTests'`：**48 项通过，0 失败**。回归覆盖打开目录类型的完整字段顺序、采纳后 Tab、反向切换、取消浏览、异步旧结果及 ⌘↓ 精确保留。
+- 独立 AppKit 原生窗口 **18 项检查通过**，使用真实字段编辑器、生产按键路由与视图鼠标命中区；完整覆盖“Tab 到工作目录 → ⌘↓ → 选择 android → Enter → 候选消失且恢复输入 → 一次 Tab 到打开方式”，以及点击浏览、进入 sdk 不改草稿、Esc/Tab/Shift+Tab 收起、保存后重新读取实际目录。
+- 截图确认采纳后没有候选区，下一次 Tab 高亮打开方式；证据位于 `build/directory-navigation-smoke/` 的 `checks.json`、`native.log`、`tests.log` 与 `01-path-input.png` 至 `04-next-field.png`。临时源码和可执行文件已清理。验证为进程内事件，未注入系统级物理按键，未访问正式命令数据。
+- 已重新打包 `build/青蛙导航.app` 和 `build/青蛙导航-macOS-arm64.zip`；固定证书签名、arm64、ZIP 实际解压签名与内容一致性校验通过。构建日志 `build/build-release-20261117-111508.log`，包校验 `build/directory-navigation-smoke/package-verification.log`。ZIP SHA-256：`96e8e5df40ca5fd00509c48705ac139bedb81d3f46949bd61f8b7a962720ab7a`。未安装或替换正式应用，未提交或推送。
+
+## macOS 键盘操作统一（2026-11-17）
+
+- 按 `plans/PLAN_MACOS_KEYBOARD.md` 实施：两处搜索保留文本焦点、Tab 显式切列表；⌘C 复制／⌘D 命令副本；字段 Tab 导航与 Enter/⌘Enter 保存；calc 历史选择不覆盖草稿；目录浏览不隐式采纳；Esc 不折叠文件夹、不停止进程，停止任务需明确确认。
+- `swift test --filter 'LauncherModelTests|BookmarkKeyboardTests|CustomCommandModelTests|GlobalHotKeyTests|TerminalCalculatorTests'`：**115 项通过，0 失败**。覆盖持久化与校验、搜索焦点、目录异步结果、菜单保留组合、任务返回与停止等相关契约；未运行无关完整测试套件。
+- 原生截图验收后修正历史焦点／停止确认的旧入口提示，并阻止点击输入区绕过停止确认；对应 `testClickActionsShareSelectionAcceptanceAndStopContracts` **1 项通过**。空命令提交恢复原输入焦点，对应 `testCalculatorClearAndCommandRoundTripRestoreExpression` **1 项通过**。两次定向回归均完成当前应用及测试编译。
+- 独立 AppKit 冒烟最终 **35 项断言通过**：真实 NSApplication 事件循环、keyWindow、NSTextView 字段编辑器、字符输入、预填退格、Shift 选区、文字复制优先、组字 Esc 放行、主界面／命令搜索焦点、calc 历史与命令往返、目录草稿保护、停止确认防穿透。使用真实隔离 `/bin/sleep` 子进程确认返回后仍运行、Enter 默认取消停止、y 确认后记录退出状态。
+- 原生窗口截图核对主界面、calc 输入／历史、目录候选、停止确认与执行结果；历史焦点显示保留的算式草稿，确认层不再展示无效命令入口。证据：`build/keyboard-smoke/checks.json`、`native.log`、场景 PNG、`tests.log`、`confirmation-regression.log`、`empty-command-regression.log`。
+- 冒烟脚本校正了无匹配搜索样本、可见选择目标及合成方向键的原生功能字符；最终运行全部通过。临时源码与可执行文件已清理，截图和记录保留。
+- 使用隔离数据目录；冒烟保存并恢复系统剪贴板，不注册全局快捷键、不改正式数据。事件在进程内经过生产路由与原生字段编辑器，**不是系统级物理按键注入**；输入法验证为真实字段 marked-text 状态，不等同于人工完整拼音候选验收。未重新打包、安装、签名或发布，正式已安装应用尚不包含本次改动。
+
+- 随后按用户授权完成 Release 打包（未安装）：首次构建因现有固定证书 `CSSMERR_TP_NOT_TRUSTED` 被阻止；经用户明确授权，只恢复该证书的代码签名信任，未创建新证书或导出私钥。固定证书指纹仍为 `05A2A276A653099A94D2D9E5E343EDB4FED2ECDD`，与已安装版 designated requirement 一致。
+- 产物：`build/青蛙导航.app`、`build/青蛙导航-macOS-arm64.zip`。脚本校验固定证书、Bundle ID 和 arm64；ZIP 实际解压后通过严格签名校验，应用内容与构建产物一致。构建日志 `build/build-release-20261117-105302.log`；包校验记录 `build/package-verification-20261117.log`。
+- ZIP SHA-256：`6f54d4d8cc52101dbfba6bbb450820bc70e913b882f9c3b8afee251e419520de`；应用二进制 SHA-256：`155482fe842d9dcb103dd4fb030ba1860cb3374e0ddb31edd948b2988015e2d0`。本次未启动 Release 包做人工交互验收，未替换 `/Applications` 正式应用，未提交或推送。
+
 ## 三页输入区传统色区分（2026-11-10）
 
 - 按确认的 B 原型实现：主界面艾背绿 `#DFECD5`、自定义命令远天蓝 `#D0DFE6`、计算器杏仁黄 `#F7E8AA`。中文页面名和模式同显；颜色取决于当前页面，而非搜索／命令／编辑输入状态。其他缓冲区保持原样。

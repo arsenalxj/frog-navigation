@@ -20,6 +20,7 @@ final class LauncherModel: ObservableObject {
     @Published var query = ""
     @Published var buffer: TerminalBuffer?
     @Published var bufferOffset = 0
+    @Published var bufferFeedback: String?
     @Published var inputKind: TerminalInputKind?
     @Published var inputText = ""
     @Published var inputRevision = 0
@@ -33,6 +34,7 @@ final class LauncherModel: ObservableObject {
     @Published var calcExpression = ""
     @Published var calcHistory: [TerminalCalcEntry] = []
     @Published var calcHistoryIndex: Int?
+    @Published var calcHistoryFocused = false
     @Published var calcError: String?
     @Published var calcFeedback: String?
     @Published var calcFeedbackLevel: TerminalLevel = .success
@@ -44,14 +46,16 @@ final class LauncherModel: ObservableObject {
     @Published var customIndex = 0
     @Published var customQuery = ""
     @Published var customDraft: CustomCommand?
+    @Published var customDeleteTarget: CustomCommand?
     @Published var customFieldIndex = 0
     @Published var customSaving = false
     @Published var customExecuting = false
+    @Published var customStopConfirmation = false
     @Published var installedCustomTerminals: [CustomCommandTerminal] = []
     @Published var customDirectoryLoading = false
-    @Published var customDirectoryBrowsing = false
+    @Published var customDirectoryFocused = false
+    @Published var customDirectoryPath = ""
     var customDirectoryBase = FileManager.default.homeDirectoryForCurrentUser
-    var customDirectoryBrowseOrigin = ""
     var customDirectoryPreselectPath: String?
     @Published var customExecutionCommand: CustomCommand?
     @Published var customExecutionInput = ""
@@ -74,12 +78,32 @@ final class LauncherModel: ObservableObject {
     var terminateApplication: (() -> Void)?
     var document: BookmarkDocument { store.document }
     var visibleRowCount: Int { 19 }
+    enum SearchAction {
+        case finish, openSelection, openSearch
+
+        var title: String {
+            switch self {
+            case .finish: return "结束搜索"
+            case .openSelection: return "打开结果"
+            case .openSearch: return "打开网址 / 网页搜索"
+            }
+        }
+    }
+
+    var searchAction: SearchAction {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .finish }
+        return items.isEmpty ? .openSearch : .openSelection
+    }
+
     var isTextInputActive: Bool {
         inputKind == .command || inputKind == .search || inputKind == .calc
-            || (inputKind == .prompt && prompt?.acceptsText == true)
+            || (inputKind == .prompt && prompt?.acceptsText == true
+                && prompt?.choicesFocused != true && !customDirectoryFocused)
     }
     var modeLabel: String {
+        if customStopConfirmation { return "CONFIRM:STOP" }
         if prompt != nil { return "PROMPT" }
+        if buffer == .calc, calcHistoryFocused, inputKind != .command { return "HISTORY" }
         if inputKind == .command { return "COMMAND" }
         if inputKind == .search { return "SEARCH" }
         if let buffer { return "BUFFER:" + buffer.rawValue.uppercased() }
@@ -110,6 +134,14 @@ final class LauncherModel: ObservableObject {
     var historyDraft = ""
     var commandCompletionPrefix: String?
     var lastCompletedCommand: String?
+    struct BufferOrigin {
+        var buffer: TerminalBuffer?
+        var inputKind: TerminalInputKind?
+        var text: String
+        var offset: Int
+    }
+    var bufferOrigin: BufferOrigin?
+    var commandOrigin: BufferOrigin?
     var logSequence = 0
     var lastIssue: String?
     var loadedWasLogged = false
@@ -177,7 +209,6 @@ final class LauncherModel: ObservableObject {
         if store.isLoaded && !loadedWasLogged {
             loadedWasLogged = true
             appendLog("青蛙导航 · \(document.bookmarks.count) bookmarks · \(document.groups.count) groups · UTF-8", .success)
-            appendLog("输入 : 打开命令 · / 搜索 · ? 帮助", .info)
         }
         if let issue = store.issue, issue != lastIssue { appendLog(issue, .error) }
         lastIssue = store.issue
@@ -268,16 +299,23 @@ final class LauncherModel: ObservableObject {
         visible = false
         presented = false
         let wasSearching = inputKind == .search
-        guard wasSearching || !query.isEmpty else { return }
+        let hadQuery = !query.isEmpty
         query = ""
+        customQuery = ""
+        customIndex = 0
         if wasSearching {
             inputKind = nil
             inputText = ""
             inputRevision &+= 1
         }
-        selectedIndex = 0
-        scrollIndex = 0
-        rebuildItems(selecting: "__reset__")
+        if commandOrigin?.inputKind == .search { commandOrigin?.inputKind = nil; commandOrigin?.text = "" }
+        if bufferOrigin?.inputKind == .search { bufferOrigin?.inputKind = nil; bufferOrigin?.text = "" }
+        if buffer == .commands, customScreen == .list { bufferOffset = 0 }
+        if hadQuery || (wasSearching && buffer == nil) {
+            selectedIndex = 0
+            scrollIndex = 0
+            rebuildItems(selecting: "__reset__")
+        }
     }
 
     var isCommandsEditing: Bool {
@@ -305,12 +343,7 @@ final class LauncherModel: ObservableObject {
             inputText = value
             prompt?.error = nil
             customFeedback = nil
-            if customDirectoryBrowsing {
-                customDirectoryBrowsing = false
-                prompt?.hint = customDirectoryHint
-            }
             captureCustomDraft()
-            if customField == .directory { refreshCustomDirectoryChoices() }
             return
         }
         if inputKind == .calc {
@@ -341,7 +374,11 @@ final class LauncherModel: ObservableObject {
     }
 
     func startCommand() {
-        guard prompt == nil, !busy else { return }
+        guard prompt == nil, !busy, !customStopConfirmation else { return }
+        bufferFeedback = nil
+        if inputKind != .command {
+            commandOrigin = BufferOrigin(buffer: buffer, inputKind: inputKind, text: inputText, offset: bufferOffset)
+        }
         historyIndex = nil
         commandCandidateIndex = nil
         historyDraft = ""
@@ -352,6 +389,8 @@ final class LauncherModel: ObservableObject {
 
     func startSearch() {
         guard prompt == nil, !busy else { return }
+        bufferFeedback = nil
+        bufferOrigin = nil
         buffer = nil
         isOrganizing = false
         selectedIndex = 0
@@ -361,7 +400,7 @@ final class LauncherModel: ObservableObject {
     }
 
     func openSettings() {
-        guard prompt == nil, !busy else { return }
+        guard prompt == nil, !busy, !customStopConfirmation else { return }
         login.refresh()
         openBuffer(.settings)
         rebuildSettings()
@@ -369,11 +408,42 @@ final class LauncherModel: ObservableObject {
 
     func openBuffer(_ buffer: TerminalBuffer) {
         guard prompt == nil, !busy else { return }
-        if buffer == .calc { openCalc(); return }
-        if buffer == .commands { openCustomCommands(); return }
+        bufferFeedback = nil
+        if buffer == .calc { bufferOrigin = nil; openCalc(); return }
+        if buffer == .commands { bufferOrigin = nil; openCustomCommands(); return }
+        if bufferOrigin == nil {
+            bufferOrigin = commandOrigin ?? BufferOrigin(buffer: self.buffer, inputKind: inputKind, text: inputText, offset: bufferOffset)
+        }
         self.buffer = buffer
         bufferOffset = 0
         inputKind = nil
+    }
+
+    func closeBuffer() {
+        bufferFeedback = nil
+        if let origin = bufferOrigin {
+            bufferOrigin = nil
+            buffer = origin.buffer
+            bufferOffset = origin.offset
+            inputKind = origin.inputKind
+            inputText = origin.text
+            inputRevision &+= 1
+            restoreCalcInputIfNeeded()
+        } else {
+            buffer = nil
+            bufferOffset = 0
+            inputKind = nil
+        }
+    }
+
+    func cancelCommand() {
+        if let origin = commandOrigin, origin.buffer == buffer {
+            inputKind = origin.inputKind
+            inputText = origin.text
+            inputRevision &+= 1
+        } else { inputKind = nil }
+        commandOrigin = nil
+        restoreCalcInputIfNeeded()
     }
 
     func selectItem(at index: Int) {
@@ -431,66 +501,59 @@ final class LauncherModel: ObservableObject {
 
     func escape() {
         guard !operationActive else { return }
+        if inputKind == .command { cancelCommand(); return }
         if isCommandsEditing { escapeCustomCommands(); return }
         if prompt != nil {
             if prompt?.command == "hotkey" { hotKey?.cancelRecording() }
             finishPrompt()
-        } else if buffer == .calc, inputKind == .command {
-            setInput(.calc, text: calcExpression)
-        } else if buffer == .calc, inputKind == nil {
-            setInput(.calc, text: calcExpression)
-        } else if inputKind == .calc {
+        } else if buffer == .calc {
+            if calcHistoryFocused { focusCalcInput() }
+            else { closeBuffer() }
+        } else if inputKind == .search || (buffer == nil && !query.isEmpty) {
+            query = ""
             inputKind = nil
-            buffer = nil
-            bufferOffset = 0
-        } else if inputKind != nil {
-            if inputKind == .search { query = ""; selectedIndex = 0; scrollIndex = 0; rebuildItems(selecting: "__reset__") }
-            inputKind = nil
-        } else if buffer != nil { buffer = nil; bufferOffset = 0 }
+            selectedIndex = 0
+            scrollIndex = 0
+            rebuildItems(selecting: "__reset__")
+        } else if buffer != nil { closeBuffer() }
         else if isOrganizing { isOrganizing = false }
-        else if !query.isEmpty { query = ""; selectedIndex = 0; scrollIndex = 0; rebuildItems(selecting: "__reset__") }
-        else if let groupID = selectedGroupID(), expandedGroupIDs.contains(groupID) {
-            expandedGroupIDs.remove(groupID)
-            persistExpanded()
-            rebuildItems(selecting: groupID)
-            appendLog("折叠文件夹 \(document.groups.first { $0.id == groupID }?.name ?? "")", .info)
-        }
-        else if !expandedGroupIDs.isEmpty {
-            let keep = selectedGroupID()
-            expandedGroupIDs = []
-            persistExpanded()
-            rebuildItems(selecting: keep)
-            appendLog("折叠全部文件夹", .info)
-        }
         else { dismissWindow?() }
     }
 
     func submitInput() {
         guard !busy else { return }
+        if customStopConfirmation { cancelCustomStop(); return }
         if isCommandsEditing, inputKind != .command {
-            if customScreen == .edit { saveCustomDraft() }
+            if customScreen == .edit {
+                if customDirectoryFocused { acceptCustomDirectoryChoice() } else { saveCustomDraft() }
+            }
             else if customScreen == .delete { escapeCustomCommands() }
-            else if inputKind == .search { inputKind = nil }
+            else if inputKind == .search, let command = selectedCustomCommand { executeCustomCommand(command) }
             return
         }
         if let prompt {
             if !prompt.acceptsText {
                 if prompt.command != "hotkey" { finishPrompt() }
+            } else if prompt.choicesFocused {
+                choosePromptOption(at: prompt.selectedChoice)
             } else { submitPrompt() }
         } else if inputKind == .calc {
             submitCalc()
         } else if inputKind == .command {
             let command = commandCandidateIndex.flatMap { commandCandidates.indices.contains($0) ? commandCandidates[$0].name : nil }
                 ?? inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !command.isEmpty else { cancelCommand(); return }
             inputKind = nil
-            if !command.isEmpty {
-                history.append(command)
-                if history.count > 50 { history.removeFirst(history.count - 50) }
-                runCommand(command)
-            }
+            history.append(command)
+            if history.count > 50 { history.removeFirst(history.count - 50) }
+            runCommand(command)
+            commandOrigin = nil
         } else if inputKind == .search {
-            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { escape() }
-            else { activateSelection() }
+            switch searchAction {
+            case .finish: escape()
+            case .openSelection: activateSelection()
+            case .openSearch: openSearch()
+            }
         }
     }
 
@@ -519,6 +582,59 @@ final class LauncherModel: ObservableObject {
         if NSPasteboard.general.setString(bookmark.url, forType: .string) {
             appendLog("已复制链接 \(bookmark.url)", .success)
         } else { appendLog("系统剪贴板未能写入链接。", .error) }
+    }
+    var canAddCurrentObject: Bool {
+        prompt == nil && !busy && !customSaving && !customStopConfirmation && inputKind == nil
+            && (buffer == nil || (buffer == .commands && customScreen == .list))
+    }
+
+    func addCurrentObject() {
+        guard canAddCurrentObject else { return }
+        if buffer == .commands { beginCustomEdit() } else { addBookmark() }
+    }
+
+    var canDuplicateCurrentCommand: Bool {
+        canAddCurrentObject && buffer == .commands && selectedCustomCommand != nil
+    }
+
+    func duplicateCurrentCommand() {
+        guard canDuplicateCurrentCommand, let command = selectedCustomCommand else { return }
+        beginCustomEdit(command, copy: true)
+    }
+
+    var canSaveCurrentEditing: Bool {
+        guard let prompt, !busy, !customSaving else { return false }
+        return !["delete", "hotkey", "commands-delete"].contains(prompt.command) && !customStopConfirmation
+    }
+
+    func saveCurrentEditing() {
+        guard canSaveCurrentEditing else { return }
+        if isCommandsEditing { saveCustomDraft() } else { submitPrompt() }
+    }
+    var canCopyCurrentObject: Bool {
+        prompt == nil && !busy && !customStopConfirmation && (inputKind == nil || inputKind == .calc)
+            && (buffer == nil || buffer == .calc || (buffer == .commands && customScreen == .list))
+    }
+
+    func copyCurrentObject() {
+        guard prompt == nil, !busy else { return }
+        switch buffer {
+        case nil: copySelection()
+        case .calc: copyCalcResult()
+        case .commands where customScreen == .list:
+            guard let command = selectedCustomCommand else { customFeedback = "没有可复制的命令。"; return }
+            NSPasteboard.general.clearContents()
+            customFeedback = NSPasteboard.general.setString(":" + command.name, forType: .string)
+                ? "已复制 :\(command.name)" : "系统剪贴板未能写入命令。"
+        default: appendLog("当前页面没有可复制的对象。", .warning)
+        }
+    }
+
+    func navigateFolder(expanding: Bool) {
+        guard query.isEmpty, items.indices.contains(selectedIndex) else { return }
+        let item = items[selectedIndex]
+        guard let id = item.kind == .folder ? item.id : (expanding ? nil : item.groupID) else { return }
+        if expandedGroupIDs.contains(id) != expanding { toggleExpanded(id) }
     }
 
     func selectedBookmark() -> Bookmark? {
@@ -634,82 +750,59 @@ final class LauncherModel: ObservableObject {
         guard event.type == .keyDown else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         let text = event.charactersIgnoringModifiers ?? ""
+        if customStopConfirmation { return handleCustomCommandKey(event, isTextEditing: isTextEditing) }
+        if modifiers == .command {
+            if text == "," { openSettings(); return true }
+            if text.lowercased() == "c", canCopyCurrentObject { copyCurrentObject(); return true }
+            if text.lowercased() == "n" { addCurrentObject(); return true }
+        }
         if isCommandsEditing, inputKind != .command { return handleCustomCommandKey(event, isTextEditing: isTextEditing) }
+        if let prompt {
+            if prompt.command == "hotkey" { return false }
+            return handlePromptKey(event)
+        }
         if inputKind == .command, modifiers == .option, [125, 126].contains(event.keyCode) {
             commandCandidateIndex = nil
             recallHistory(event.keyCode == 126 ? -1 : 1)
             return true
         }
-        if modifiers.contains(.command) {
-            if modifiers == .command, text == "," { openSettings(); return true }
-            if modifiers == .command, text.lowercased() == "n" { addBookmark(); return true }
-            return false
-        }
-        if modifiers.contains(.control) || modifiers.contains(.option) { return false }
-        if event.keyCode == 53 { escape(); return true }
-        if buffer == .calc, inputKind == .calc {
-            return handleCalcKey(event, characters: event.characters ?? "")
-        }
-        if let prompt {
-            if prompt.command == "hotkey" { return false }
-            if !prompt.acceptsText {
-                if text.lowercased() == "y" { confirmPrompt(); return true }
-                if text.lowercased() == "n" || [36, 76].contains(event.keyCode) { escape(); return true }
-                return false
-            }
-            switch event.keyCode {
-            case 36, 76: submitInput(); return true
-            case 48:
-                if prompt.command == "edit" { switchEditField() }
-                else if modifiers.contains(.shift) { previousPrompt() }
-                else { cyclePromptChoice(1) }
-                return true
-            case 125, 126:
-                guard !prompt.choices.isEmpty else { return false }
-                cyclePromptChoice(event.keyCode == 125 ? 1 : -1)
-                return true
-            default: return false
-            }
-        }
+        if modifiers.contains(.command) || modifiers.contains(.control) || modifiers.contains(.option) { return false }
+        if event.keyCode == 53, modifiers.isEmpty { escape(); return true }
+        if buffer == .calc, inputKind != .command { return handleCalcKey(event, characters: event.characters ?? "") }
         if inputKind == .command {
+            guard modifiers.isEmpty || (modifiers == .shift && event.keyCode == 48) else { return false }
             switch event.keyCode {
             case 36, 76: submitInput(); return true
-            case 48: completeCommand(backward: modifiers.contains(.shift)); return true
+            case 48: completeCommand(backward: modifiers == .shift); return true
             case 125, 126:
-                moveCommandCandidate(event.keyCode == 126 ? -1 : 1)
-                return true
+                moveCommandCandidate(event.keyCode == 126 ? -1 : 1); return true
             default: return false
             }
         }
         if inputKind == .search {
+            guard modifiers.isEmpty || (modifiers == .shift && event.keyCode == 48) else { return false }
             switch event.keyCode {
             case 36, 76: submitInput(); return true
             case 48: selectItem(at: selectedIndex); return true
-            case 125, 126:
-                moveCursor(event.keyCode == 125 ? 1 : -1)
-                selectItem(at: selectedIndex)
-                return true
+            case 125, 126: moveCursor(event.keyCode == 125 ? 1 : -1); return true
             default: return false
             }
         }
         if isTextEditing { return false }
         if event.keyCode == 48 {
-            if buffer == nil, items.indices.contains(selectedIndex), items[selectedIndex].kind == .folder {
-                toggleExpanded(items[selectedIndex].id)
-            }
+            if buffer == nil, modifiers == .shift, !query.isEmpty { setInput(.search, text: query) }
             return true
         }
-        if text == ":" { startCommand(); return true }
-        if buffer == .settings { return true }
+        if text == ":", modifiers.isEmpty || modifiers == .shift { startCommand(); return true }
         if buffer != nil {
-            if text == "/" { self.buffer = nil; bufferOffset = 0; startSearch(); return true }
-            if text == "?" { openBuffer(.help); return true }
+            if text == "/", modifiers.isEmpty { bufferOrigin = nil; startSearch(); return true }
+            if text == "?", modifiers == .shift { openBuffer(.help); return true }
+            guard modifiers.isEmpty || (modifiers == .shift && text == "G") else { return false }
             switch event.keyCode {
             case 125: moveBuffer(1); return true
             case 126: moveBuffer(-1); return true
             case 121: scroll(rows: 18); return true
             case 116: scroll(rows: -18); return true
-            case 36, 76: return true
             default: break
             }
             if text == "j" { moveBuffer(1); return true }
@@ -718,15 +811,17 @@ final class LauncherModel: ObservableObject {
             if text == "G" { scroll(rows: Int.max / 2); return true }
             return false
         }
-        if isOrganizing && modifiers.contains(.shift) && ([125, 126].contains(event.keyCode) || ["J", "K"].contains(text)) {
-            reorderSelection(event.keyCode == 125 || text == "J" ? 1 : -1)
-            return true
+        if isOrganizing, modifiers == .shift, [125, 126].contains(event.keyCode) {
+            reorderSelection(event.keyCode == 125 ? 1 : -1); return true
         }
+        guard modifiers.isEmpty || (modifiers == .shift && ["D", "G", "?"].contains(text)) else { return false }
         switch event.keyCode {
         case 125: moveCursor(1); return true
         case 126: moveCursor(-1); return true
         case 121: moveCursor(visibleRowCount); return true
         case 116: moveCursor(-visibleRowCount); return true
+        case 123: navigateFolder(expanding: false); return true
+        case 124: navigateFolder(expanding: true); return true
         case 36, 76: activateSelection(); return true
         default: break
         }
@@ -736,13 +831,13 @@ final class LauncherModel: ObservableObject {
         case "g": selectedIndex = 0; clampSelection()
         case "G": selectedIndex = max(0, items.count - 1); clampSelection()
         case "/": startSearch()
-        case "a": addBookmark()
+        case "a": addCurrentObject()
         case "n": beginMkdir()
-        case "e": beginEdit()
-        case "r": beginRename()
+        case "e":
+            if items.indices.contains(selectedIndex), items[selectedIndex].kind == .folder { beginRename() }
+            else { beginEdit() }
         case "m": beginMove()
         case "D": requestDeleteSelection()
-        case "c", "C": copySelection()
         case "o": toggleOrganizing()
         case "z": toggleAllExpanded()
         case "?": openBuffer(.help)

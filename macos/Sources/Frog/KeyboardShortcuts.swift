@@ -62,14 +62,17 @@ struct ApplicationMenuCommand {
     static let hide = ApplicationMenuCommand(title: "隐藏青蛙导航", action: "hide:", key: "h")
     static let quit = ApplicationMenuCommand(title: "退出青蛙导航", action: "terminate:", key: "q")
     static let add = ApplicationMenuCommand(title: "添加书签…", action: "addBookmark", key: "n")
+    static let duplicate = ApplicationMenuCommand(title: "创建命令副本", action: "duplicateCommand", key: "d")
+    static let save = ApplicationMenuCommand(title: "保存编辑", action: "saveEditing", key: "\r")
+    static let stop = ApplicationMenuCommand(title: "停止任务…", action: "stopTask", key: ".")
     static let editing = [
         ApplicationMenuCommand(title: "撤销", action: "undo:", key: "z"),
         ApplicationMenuCommand(title: "剪切", action: "cut:", key: "x"),
-        ApplicationMenuCommand(title: "复制", action: "copy:", key: "c"),
+        ApplicationMenuCommand(title: "复制", action: "copyObject:", key: "c"),
         ApplicationMenuCommand(title: "粘贴", action: "paste:", key: "v"),
         ApplicationMenuCommand(title: "全选", action: "selectAll:", key: "a")
     ]
-    static var defaults: [MenuShortcut] { ([settings, hide, quit, add] + editing).map { MenuShortcut(key: $0.key) } }
+    static var defaults: [MenuShortcut] { ([settings, hide, quit, add, duplicate, save, stop] + editing).map { MenuShortcut(key: $0.key) } }
 
     @MainActor
     static var reservedShortcuts: [MenuShortcut] {
@@ -86,18 +89,23 @@ struct ApplicationMenuCommand {
 }
 
 enum LauncherKeyboardCommand: Equatable {
-    case escape, settings, scrollUp, scrollDown, textNavigation, moveSelection, activate, focusSearch
+    case escape, settings, scrollUp, scrollDown, textNavigation, moveSelection, activate, focusSearch, objectAction, history
 
     static func match(keyCode: UInt32, modifiers: UInt32, characters: String?) -> LauncherKeyboardCommand? {
-        let command = modifiers & UInt32(cmdKey) != 0
-        if keyCode == 53 { return .escape }
-        if command, characters == "," { return .settings }
-        if command, keyCode == 123 || keyCode == 124 { return .textNavigation }
-        if keyCode == 116 { return .scrollUp }
-        if keyCode == 121 { return .scrollDown }
-        if [123, 124, 125, 126].contains(keyCode), !command, modifiers & UInt32(optionKey) == 0 { return .moveSelection }
-        if keyCode == 36 || keyCode == 76 { return .activate }
-        if characters == "/" { return .focusSearch }
+        if modifiers == UInt32(cmdKey) {
+            if characters == "," { return .settings }
+            if ["c", "d", "n", "."].contains(characters?.lowercased() ?? "") || [36, 76].contains(keyCode) { return .objectAction }
+            if keyCode == 125 { return .objectAction }
+            if [123, 124].contains(keyCode) { return .textNavigation }
+        }
+        if modifiers == UInt32(optionKey), [125, 126].contains(keyCode) { return .history }
+        guard modifiers == 0 || modifiers == UInt32(shiftKey) else { return nil }
+        if keyCode == 53, modifiers == 0 { return .escape }
+        if keyCode == 116, modifiers == 0 { return .scrollUp }
+        if keyCode == 121, modifiers == 0 { return .scrollDown }
+        if [123, 124, 125, 126].contains(keyCode) { return .moveSelection }
+        if [36, 76].contains(keyCode), modifiers == 0 { return .activate }
+        if characters == "/", modifiers == 0 { return .focusSearch }
         return nil
     }
 }

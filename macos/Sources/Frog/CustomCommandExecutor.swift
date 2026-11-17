@@ -17,7 +17,7 @@ private enum CustomCommandExecutionError: LocalizedError {
     }
 }
 
-/// 后台程序的终止句柄；跨线程访问用锁保护，供 Esc 终止使用。
+/// 后台程序的终止句柄；跨线程访问用锁保护，仅供明确确认后的停止操作使用。
 final class RunningProgramBox: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
@@ -69,6 +69,8 @@ final class CustomCommandExecutor {
     }
 
     func execute(_ command: CustomCommand, input: String) async throws -> CustomCommandExecutionResult {
+        // 启动前校验失败也要清除排队的停止请求，不能影响下一条命令。
+        defer { runningProgram.attach(nil) }
         let command = try command.validated(reservedNames: [])
         if command.type == .url {
             let destination = try Self.url(template: command.target, input: input)

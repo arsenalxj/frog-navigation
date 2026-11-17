@@ -18,30 +18,29 @@ extension LauncherModel {
         completionTask?.cancel()
         completionTask = nil
         customDirectoryLoading = false
-        customDirectoryBrowsing = false
-        customDirectoryBrowseOrigin = ""
+        customDirectoryFocused = false
+        customDirectoryPath = ""
         customDirectoryPreselectPath = nil
+        customDeleteTarget = nil
         prompt = nil
         inputKind = nil
         draft = Draft()
         // 异步提交期间 busy 仍为 true，这里直接恢复计算器，而不是等待 busy 清零。
-        if buffer == .calc { setInput(.calc, text: calcExpression) }
+        if buffer == .calc, !calcHistoryFocused { setInput(.calc, text: calcExpression) }
     }
 
     func addBookmark() {
         guard prompt == nil, !busy else { return }
         buffer = nil
         draft = Draft()
-        beginPrompt("add", total: 3, field: "url", value: "", hint: "Enter 下一步 · Esc 取消")
+        showBookmarkField(command: "add", field: "url")
     }
 
     func beginEdit(urlFirst: Bool = false) {
         guard prompt == nil, !busy, let bookmark = selectedBookmark() else { return }
         draft = Draft(id: bookmark.id, url: bookmark.url, title: bookmark.title,
                       location: bookmark.groupId ?? "__root__")
-        beginPrompt("edit", step: urlFirst ? 1 : 0, total: 2, field: urlFirst ? "url" : "title",
-                    value: urlFirst ? bookmark.url : bookmark.title,
-                    hint: "Tab/Shift+Tab 切换字段 · Enter 保存全部 · Esc 取消")
+        showBookmarkField(command: "edit", field: urlFirst ? "url" : "title")
     }
 
     func beginRename() {
@@ -64,10 +63,9 @@ extension LauncherModel {
     func beginMove() {
         guard prompt == nil, !busy, let bookmark = selectedBookmark() else { return }
         draft = Draft(id: bookmark.id, location: bookmark.groupId == nil ? "__new__" : "__root__")
-        let options = locationChoices()
+        let options = locationChoices().filter { $0.id != (bookmark.groupId ?? "__root__") }
         draft.location = options.first?.id ?? "__new__"
-        beginPrompt("move", field: "to", value: options.first?.label ?? "新建文件夹…",
-                    hint: "Tab/上下选择 · Enter 移动 · Esc 取消")
+        showLocation(command: "move")
     }
 
     func requestDeleteSelection() {
@@ -93,38 +91,89 @@ extension LauncherModel {
         }
     }
 
-    func switchEditField() {
-        guard prompt?.command == "edit", !busy else { return }
-        captureDraft()
-        let url = prompt?.field == "title"
-        beginPrompt("edit", step: url ? 1 : 0, total: 2, field: url ? "url" : "title",
-                    value: url ? draft.url : (draft.title ?? ""),
-                    hint: "Tab/Shift+Tab 切换字段 · Enter 保存全部 · Esc 取消")
+    func promptFields(command: String) -> [String] {
+        var fields = command == "move" ? ["to"] : ["url", "title", "location"]
+        if draft.location == "__new__" { fields.append("folder") }
+        return fields
     }
 
-    func previousPrompt() {
+    func showBookmarkField(command: String, field: String) {
+        if draft.title == nil, let url = try? BookmarkURL.normalize(draft.url) {
+            draft.title = URL(string: url)?.host ?? ""
+        }
+        let fields = promptFields(command: command)
+        let value: String
+        switch field {
+        case "url": value = draft.url
+        case "title": value = draft.title ?? ""
+        case "folder": value = draft.folderName
+        default: value = locationChoices().first(where: { $0.id == draft.location })?.label ?? ""
+        }
+        beginPrompt(command, step: fields.firstIndex(of: field) ?? 0, total: fields.count,
+                    field: field, value: value,
+                    hint: "Tab/Shift+Tab 切换字段与候选 · Enter/⌘Enter 保存全部 · Esc 取消并丢弃草稿")
+    }
+
+    func switchPromptField(_ direction: Int) {
         guard let prompt, !busy else { return }
         captureDraft()
-        if prompt.command == "add" {
-            switch prompt.step {
-            case 1:
-                beginPrompt("add", total: 3, field: "url", value: draft.url, hint: "Enter 下一步 · Esc 取消")
-            case 2:
-                beginPrompt("add", step: 1, total: 3, field: "title", value: draft.title ?? "",
-                            hint: "Enter 下一步 · Shift+Tab 返回 · Esc 取消")
-            case 3: showLocation(command: "add")
-            default: break
-            }
-        } else if prompt.command == "move", prompt.step == 1 { showLocation(command: "move") }
+        guard ["add", "edit", "move"].contains(prompt.command) else {
+            self.prompt?.choicesFocused = !prompt.choicesFocused && !prompt.choices.isEmpty
+            return
+        }
+        let fields = promptFields(command: prompt.command)
+        let index = fields.firstIndex(of: prompt.field) ?? 0
+        if direction > 0, !prompt.choicesFocused, !prompt.choices.isEmpty {
+            self.prompt?.choicesFocused = true
+            return
+        }
+        if direction < 0, prompt.choicesFocused {
+            self.prompt?.choicesFocused = false
+            return
+        }
+        let next = (index + direction + fields.count) % fields.count
+        showBookmarkField(command: prompt.command, field: fields[next])
+        if direction < 0, !(self.prompt?.choices.isEmpty ?? true) { self.prompt?.choicesFocused = true }
     }
 
     func showLocation(command: String) {
-        let choices = locationChoices()
-        let selected = choices.first(where: { $0.id == draft.location }) ?? choices.first
-        draft.location = selected?.id ?? "__root__"
-        beginPrompt(command, step: command == "add" ? 2 : 0, total: command == "add" ? 3 : 0,
-                    field: command == "add" ? "location" : "to", value: selected?.label ?? "",
-                    hint: "Tab/上下选择 · Shift+Tab 返回 · Enter 选择 · Esc 取消")
+        showBookmarkField(command: command, field: command == "move" ? "to" : "location")
+    }
+
+    func handlePromptKey(_ event: NSEvent) -> Bool {
+        guard let prompt, !busy else { return false }
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if prompt.command == "delete" {
+            guard modifiers.isEmpty else { return false }
+            if event.charactersIgnoringModifiers == "y" { confirmPrompt(); return true }
+            if event.charactersIgnoringModifiers == "n" || [36, 76, 53].contains(event.keyCode) {
+                finishPrompt()
+                return true
+            }
+            return false
+        }
+        if [36, 76].contains(event.keyCode), modifiers == .command {
+            submitPrompt()
+            return true
+        }
+        if event.keyCode == 48, modifiers.isEmpty || modifiers == .shift {
+            switchPromptField(modifiers == .shift ? -1 : 1)
+            return true
+        }
+        guard modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case 53:
+            if prompt.choicesFocused { self.prompt?.choicesFocused = false }
+            else { finishPrompt() }
+        case 36, 76:
+            if prompt.choicesFocused { choosePromptOption(at: prompt.selectedChoice) }
+            else { submitPrompt() }
+        case 125, 126:
+            guard prompt.choicesFocused else { return false }
+            cyclePromptChoice(event.keyCode == 125 ? 1 : -1)
+        default: return false
+        }
+        return true
     }
 
     func locationChoices() -> [TerminalChoice] {
@@ -133,7 +182,7 @@ extension LauncherModel {
             .map { TerminalChoice(id: $0.id, label: $0.name,
                                   detail: "\(document.bookmarks(in: $0.id).count) bookmarks") }
         choices.append(TerminalChoice(id: "__new__", label: "新建文件夹…", detail: "先命名，再原子保存"))
-        if prompt?.command == "move" || draft.id != nil {
+        if prompt?.command == "move" {
             if let bookmark = document.bookmarks.first(where: { $0.id == draft.id }) {
                 choices.removeAll { $0.id == (bookmark.groupId ?? "__root__") }
             }
@@ -160,6 +209,7 @@ extension LauncherModel {
         let choice = prompt.choices[index]
         self.prompt?.selectedChoice = index
         self.prompt?.error = nil
+        self.prompt?.choicesFocused = false
         if ["location", "to"].contains(prompt.field) { draft.location = choice.id }
         setInput(.prompt, text: choice.label)
         captureDraft()
@@ -168,11 +218,7 @@ extension LauncherModel {
 
     func cyclePromptChoice(_ direction: Int) {
         guard let prompt, !busy, !prompt.choices.isEmpty else { return }
-        let currentIsFilled = prompt.choices.indices.contains(prompt.selectedChoice)
-            && prompt.choices[prompt.selectedChoice].label == inputText
-        let index = currentIsFilled ? (prompt.selectedChoice + direction + prompt.choices.count) % prompt.choices.count
-            : (direction < 0 ? prompt.choices.count - 1 : prompt.selectedChoice)
-        choosePromptOption(at: index)
+        self.prompt?.selectedChoice = (prompt.selectedChoice + direction + prompt.choices.count) % prompt.choices.count
     }
 
     static func checkedFolderName(_ value: String, in document: BookmarkDocument, excluding id: String? = nil) throws -> String {
@@ -197,43 +243,25 @@ extension LauncherModel {
         captureDraft()
         do {
             switch prompt.command {
-            case "add":
-                switch prompt.step {
-                case 0:
-                    draft.url = try BookmarkURL.normalize(draft.url)
-                    let title = draft.title ?? URL(string: draft.url)?.host ?? ""
-                    draft.title = title
-                    beginPrompt("add", step: 1, total: 3, field: "title", value: title,
-                                hint: "Enter 下一步 · Shift+Tab 返回 · Esc 取消")
-                case 1:
-                    draft.title = try Self.checkedTitle(draft.title ?? "")
-                    showLocation(command: "add")
-                case 2:
-                    guard prompt.choices.indices.contains(prompt.selectedChoice) else {
-                        throw BookmarkError.invalidData("请选择一个有效位置。")
-                    }
-                    draft.location = prompt.choices[prompt.selectedChoice].id
-                    if draft.location == "__new__" {
-                        beginPrompt("add", step: 3, total: 4, field: "folder", value: draft.folderName,
-                                    hint: "Enter 创建并添加 · Shift+Tab 返回 · Esc 取消")
-                    } else { saveAddedBookmark() }
-                default:
-                    _ = try Self.checkedFolderName(draft.folderName, in: document)
-                    saveAddedBookmark()
-                }
-            case "edit":
-                let title: String
-                do { title = try Self.checkedTitle(draft.title ?? "") }
-                catch { showEditError(field: "title", error: error); return }
-                let url: String
-                do { url = try BookmarkURL.normalize(draft.url) }
-                catch { showEditError(field: "url", error: error); return }
-                guard let id = draft.id else { throw BookmarkError.invalidData("书签已不存在。") }
-                mutate("已保存 “\(title)”") { document in
-                    guard let bookmark = document.bookmarks.first(where: { $0.id == id }) else {
+            case "add", "edit":
+                do { draft.url = try BookmarkURL.normalize(draft.url) }
+                catch { showPromptError(field: "url", error: error); return }
+                if draft.title == nil { draft.title = URL(string: draft.url)?.host ?? "" }
+                do { draft.title = try Self.checkedTitle(draft.title ?? "") }
+                catch { showPromptError(field: "title", error: error); return }
+                guard validatePromptLocation() else { return }
+                if prompt.command == "add" { saveAddedBookmark(); return }
+                let snapshot = draft
+                guard let id = snapshot.id else { throw BookmarkError.invalidData("书签已不存在。") }
+                mutate("已保存 “\(snapshot.title ?? "")”") { document in
+                    guard document.bookmarks.contains(where: { $0.id == id }) else {
                         throw BookmarkError.invalidData("该书签已被外部删除；未提交输入仍保留。")
                     }
-                    return try document.upsertBookmark(id: id, title: title, url: url, groupID: bookmark.groupId)
+                    let newName = snapshot.location == "__new__"
+                        ? try Self.checkedFolderName(snapshot.folderName, in: document) : nil
+                    return try document.upsertBookmark(id: id, title: snapshot.title ?? "", url: snapshot.url,
+                        groupID: snapshot.location == "__root__" || newName != nil ? nil : snapshot.location,
+                        newGroupName: newName)
                 }
             case "rename", "mkdir":
                 let id = draft.id
@@ -244,17 +272,7 @@ extension LauncherModel {
                     return try document.addGroup(name: checked)
                 }
             case "move":
-                if prompt.step == 0 {
-                    guard prompt.choices.indices.contains(prompt.selectedChoice) else {
-                        throw BookmarkError.invalidData("请选择一个有效目标。")
-                    }
-                    draft.location = prompt.choices[prompt.selectedChoice].id
-                    if draft.location == "__new__" {
-                        beginPrompt("move", step: 1, total: 2, field: "name", value: draft.folderName,
-                                    hint: "Enter 创建并移动 · Shift+Tab 返回 · Esc 取消")
-                        return
-                    }
-                } else { _ = try Self.checkedFolderName(draft.folderName, in: document) }
+                guard validatePromptLocation() else { return }
                 let snapshot = draft
                 guard let id = snapshot.id else { throw BookmarkError.invalidData("书签已不存在。") }
                 mutate("已移动书签") { document in
@@ -274,13 +292,22 @@ extension LauncherModel {
         } catch { self.prompt?.error = error.localizedDescription }
     }
 
-    func showEditError(field: String, error: Error) {
-        if prompt?.field != field {
-            beginPrompt("edit", step: field == "url" ? 1 : 0, total: 2, field: field,
-                        value: field == "url" ? draft.url : (draft.title ?? ""),
-                        hint: "Tab/Shift+Tab 切换字段 · Enter 保存全部 · Esc 取消")
-        }
+    func showPromptError(field: String, error: Error) {
+        guard let command = prompt?.command else { return }
+        showBookmarkField(command: command, field: field)
         prompt?.error = error.localizedDescription
+    }
+
+    func validatePromptLocation() -> Bool {
+        if draft.location == "__new__" {
+            do { _ = try Self.checkedFolderName(draft.folderName, in: document) }
+            catch { showPromptError(field: "folder", error: error); return false }
+        } else if draft.location != "__root__", !document.groups.contains(where: { $0.id == draft.location }) {
+            showPromptError(field: prompt?.command == "move" ? "to" : "location",
+                            error: BookmarkError.invalidData("请选择一个有效位置。"))
+            return false
+        }
+        return true
     }
 
     func saveAddedBookmark() {
@@ -319,7 +346,7 @@ extension LauncherModel {
         } else { value = store.directory.path + "/" }
         draft = Draft(path: value)
         beginPrompt(command, field: command == "restore" ? "file" : "path", value: value,
-                    hint: command == "restore" ? "Enter 恢复并替换全部书签与文件夹 · Tab 补全 · Esc 取消" : "Enter 提交 · Tab/上下补全真实路径 · Esc 取消")
+                    hint: command == "restore" ? "Enter 恢复并替换全部书签与文件夹 · Tab 切换候选 · Esc 取消" : "Enter/⌘Enter 提交 · Tab 切换候选 · ↑↓ 选择 · Esc 取消")
     }
 
     func resolvedPath(_ raw: String) throws -> URL {

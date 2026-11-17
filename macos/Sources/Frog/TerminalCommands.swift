@@ -3,16 +3,16 @@ import FrogCore
 
 extension LauncherModel {
     static let commandDirectory: [TerminalCommand] = [
-        .init(name: "add", summary: "添加书签", usage: ":add", detail: "URL → title → location；新文件夹与书签一起保存"),
-        .init(name: "edit", summary: "编辑所选书签", usage: ":edit [title|url]", detail: "Tab/Shift+Tab 切字段；Enter 一次保存全部；Esc 不保存"),
+        .init(name: "add", summary: "添加书签", usage: ":add", detail: "Tab 切字段；Enter/⌘Enter 保存全部"),
+        .init(name: "edit", summary: "编辑所选书签", usage: ":edit [title|url]", detail: "Tab/Shift+Tab 切字段；Enter/⌘Enter 保存全部；Esc 丢弃草稿"),
         .init(name: "rename", summary: "重命名所选文件夹", usage: ":rename", detail: "非空、60 字以内、不能重名"),
         .init(name: "mkdir", summary: "创建文件夹", usage: ":mkdir [名称]", detail: "空参数进入名称提示流"),
         .init(name: "move", summary: "移动所选书签", usage: ":move", detail: "根目录 / 现有文件夹 / 新建文件夹；Enter 前不写入"),
         .init(name: "delete", summary: "删除所选项", usage: ":delete", detail: "y 确认，N/Enter/Esc 取消；只可删除空文件夹"),
         .init(name: "open", summary: "打开书签或切换文件夹", usage: ":open", detail: "打开当前选中项；文件夹展开或折叠；网址交给系统默认浏览器"),
-        .init(name: "copy", summary: "复制所选书签网址", usage: ":copy", detail: "写入系统剪贴板"),
+        .init(name: "copy", summary: "复制当前页面对象", usage: ":copy", detail: "书签网址 / 命令调用文本 / 计算结果；写入系统剪贴板"),
         .init(name: "find", summary: "搜索标题和网址", usage: ":find [关键词]", detail: "上下选择；无结果 Enter 打开网址或 Google 搜索"),
-        .init(name: "calc", summary: "打开计算器", usage: ":calc [clear]", detail: "支持 + - * / 与括号；历史保留，c 复制结果"),
+        .init(name: "calc", summary: "打开计算器", usage: ":calc [clear]", detail: "Enter 计算；Tab 浏览历史，Enter 载入；⌘C 复制结果"),
         .init(name: "commands", summary: "管理自定义命令", usage: ":commands", detail: "终端 / 程序 / 网址 / 打开目录；a 新建、e 编辑、Enter 运行"),
         .init(name: "group", summary: "展开并定位文件夹", usage: ":group 名称", detail: "完整名称或唯一前缀；:group 根目录 折叠全部"),
         .init(name: "backup", summary: "导出 JSON 备份", usage: ":backup [文件路径]", detail: "真实数据快照；支持空格和 ~；不能覆盖当前 bookmarks.json"),
@@ -32,12 +32,17 @@ extension LauncherModel {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.first == ":" { value.removeFirst() }
         guard !value.isEmpty else { return }
+        bufferFeedback = nil
         let split = value.firstIndex(where: \.isWhitespace) ?? value.endIndex
         let name = value[..<split].lowercased()
         let argument = String(value[split...]).trimmingCharacters(in: .whitespacesAndNewlines)
         inputKind = nil
         appendLog(":" + value, .command)
         defer { restoreCalcInputIfNeeded() }
+        if buffer != nil, ["add", "edit", "rename", "mkdir", "move", "delete", "open"].contains(name) {
+            commandError(":\(name) 仅用于主界面书签，请先返回主界面。")
+            return
+        }
         switch name {
         case "add": addBookmark()
         case "edit":
@@ -54,12 +59,12 @@ extension LauncherModel {
                 commandError("用法：:open；命令作用于当前选中项。")
                 return
             }
-            buffer = nil
             activateSelection()
-        case "copy": copySelection()
+        case "copy": copyCurrentObject()
         case "find": startSearch(); updateInput(argument)
         case "group":
             if ["根目录", "root", "/"].contains(argument) {
+                bufferOrigin = nil
                 buffer = nil
                 query = ""
                 scrollIndex = 0
@@ -74,6 +79,7 @@ extension LauncherModel {
             let exact = document.groups.first { $0.name == argument }
             let matches = document.groups.filter { $0.name.hasPrefix(argument) }
             if let group = exact ?? (matches.count == 1 ? matches.first : nil) {
+                bufferOrigin = nil
                 buffer = nil
                 query = ""
                 scrollIndex = 0
@@ -96,7 +102,7 @@ extension LauncherModel {
             }
             beginEdgeImport(path: path.isEmpty ? nil : path)
         case "calc", "calculator":
-            if argument.isEmpty { openCalc() }
+            if argument.isEmpty { openBuffer(.calc) }
             else if argument.lowercased() == "clear" {
                 clearCalc()
                 if buffer == .calc { setCalcFeedback("✓ 计算器已清空", .success) }
@@ -105,7 +111,7 @@ extension LauncherModel {
         case "set": runSetting(argument)
         case "commands":
             guard argument.isEmpty else { commandError("用法：:commands 打开自定义命令管理。"); return }
-            openCustomCommands()
+            openBuffer(.commands)
         case "help": openBuffer(.help)
         case "log": openBuffer(.log)
         case "clear":
@@ -126,6 +132,7 @@ extension LauncherModel {
         appendLog(message, .error)
         if buffer == .calc, prompt == nil { setCalcFeedback("✗ " + message, .error) }
         if buffer == .commands { customFeedback = message }
+        if let buffer, [.settings, .help, .log, .job].contains(buffer) { bufferFeedback = message }
     }
 
     func runSetting(_ argument: String) {

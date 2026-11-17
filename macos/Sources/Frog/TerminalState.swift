@@ -35,7 +35,11 @@ struct TerminalPrompt: Equatable {
     var context: String? = nil
     var choices: [TerminalChoice] = []
     var selectedChoice: Int = 0
+    var choicesFocused: Bool = false
     var acceptsText: Bool = true
+    var keyboardHint: String {
+        choicesFocused ? "↑↓ 选择 · Enter 采纳并回到字段 · Tab/Shift+Tab 切换焦点 · ⌘Enter 提交已采纳值 · Esc 回到字段" : hint
+    }
     var label: String {
         "\(command)\(total > 0 ? " \(step + 1)/\(total)" : "") › \(field)"
     }

@@ -16,7 +16,7 @@ struct FrogApplication {
 }
 
 @MainActor
-final class ApplicationDelegate: NSObject, NSApplicationDelegate {
+final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var launcher: LauncherWindowController?
     private var store: BookmarkStore!
     private var model: LauncherModel!
@@ -110,7 +110,30 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         launcher?.showLauncher(on: screenID)
     }
     @objc private func openSettings() { showLauncher(); model.openSettings() }
-    @objc private func addBookmark() { showLauncher(); model.addBookmark() }
+    @objc private func addBookmark() { showLauncher(); model.addCurrentObject() }
+    @objc private func copyObject(_ sender: Any?) {
+        LauncherKeyRouter.copy(model: model, firstResponder: launcher?.window?.firstResponder)
+    }
+    @objc private func duplicateCommand() { model.duplicateCurrentCommand() }
+    @objc private func saveEditing() { model.saveCurrentEditing() }
+    @objc private func stopTask() { model.requestCustomStop() }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard model != nil else { return false }
+        switch menuItem.action {
+        case #selector(addBookmark):
+            menuItem.title = model.buffer == .commands ? "新建命令…" : "添加书签…"
+            return model.canAddCurrentObject
+        case #selector(copyObject(_:)):
+            let editor = launcher?.window?.firstResponder as? NSTextView
+            return (editor?.selectedRange().length ?? 0) > 0 || model.canCopyCurrentObject
+        case #selector(duplicateCommand): return model.canDuplicateCurrentCommand
+        case #selector(saveEditing): return model.canSaveCurrentEditing
+        case #selector(stopTask): return model.buffer == .commands && model.canStopCustomExecution && model.prompt == nil && model.inputKind == nil && !model.customStopConfirmation
+        case #selector(openSettings): return model.prompt == nil && !model.busy && !model.customStopConfirmation
+        default: return true
+        }
+    }
     private func installMenu() {
         let menu = NSMenu()
         let app = NSMenuItem(); let appMenu = NSMenu(title: "青蛙导航")
@@ -123,10 +146,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         let file = NSMenuItem(); let fileMenu = NSMenu(title: "文件")
         let add = ApplicationMenuCommand.add.menuItem(target: self)
         fileMenu.addItem(add); file.submenu = fileMenu; menu.addItem(file)
+        fileMenu.addItem(ApplicationMenuCommand.save.menuItem(target: self))
+        fileMenu.addItem(ApplicationMenuCommand.stop.menuItem(target: self))
         let edit = NSMenuItem(); let editMenu = NSMenu(title: "编辑")
         for command in ApplicationMenuCommand.editing {
-            editMenu.addItem(command.menuItem())
+            editMenu.addItem(command.menuItem(target: command.action == "copyObject:" ? self : nil))
         }
+        editMenu.addItem(ApplicationMenuCommand.duplicate.menuItem(target: self))
         edit.submenu = editMenu; menu.addItem(edit)
         NSApp.mainMenu = menu
     }
@@ -262,6 +288,16 @@ enum LauncherKeyRouter {
     static func handle(_ event: NSEvent, model: LauncherModel, firstResponder: NSResponder?) -> Bool {
         // 中文组字的确认、取消与候选移动先交给系统输入法。
         if let input = firstResponder as? NSTextInputClient, input.hasMarkedText() { return false }
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "c" {
+            if let editor = firstResponder as? NSTextView, editor.selectedRange().length > 0 { return false }
+        }
         return model.handleKey(event, isTextEditing: firstResponder is NSTextView)
+    }
+
+    static func copy(model: LauncherModel, firstResponder: NSResponder?) {
+        if let editor = firstResponder as? NSTextView, editor.selectedRange().length > 0 {
+            editor.copy(nil)
+        } else if model.canCopyCurrentObject { model.copyCurrentObject() }
     }
 }

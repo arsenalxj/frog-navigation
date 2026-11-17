@@ -234,7 +234,32 @@ final class CustomCommandModelTests: XCTestCase {
         XCTAssertTrue(saved.isEmpty)
         XCTAssertEqual(try Data(contentsOf: model.store.directory.appendingPathComponent("bookmarks.json")), bookmarkData)
     }
-    func testDirectoryBrowseModesTraverseAndConfirmWithoutSavingEarly() async throws {
+
+    func testDeleteConfirmationKeepsCapturedTargetAcrossHideAndFilterReset() async throws {
+        for filtered in [false, true] {
+            let model = try await model()
+            let commands = ["first", "second"].map {
+                CustomCommand(name: $0, title: $0, type: .directory, directory: model.store.directory.path, terminal: .finder)
+            }
+            try await model.customStore.save(commands, reservedNames: LauncherModel.reservedCommandNames)
+            model.loadCustomCommands()
+            await model.customLoadTask?.value
+            model.openCustomCommands()
+            if filtered { model.startCustomSearch(); model.updateInput("second") }
+            model.selectCustomCommand(filtered ? 0 : 1)
+            model.requestCustomDelete()
+            model.didHide()
+            XCTAssertEqual(model.selectedCustomCommand?.name, "first")
+            XCTAssertEqual(model.customDisplayedCommand, commands[1])
+            model.requestCustomDelete()
+            XCTAssertEqual(model.customDisplayedCommand, commands[1])
+            XCTAssertTrue(model.handleKey(try event(16, "y"), isTextEditing: false))
+            try await wait { !model.customSaving }
+            let saved = try await model.customStore.load(reservedNames: LauncherModel.reservedCommandNames)
+            XCTAssertEqual(saved, [commands[0]])
+        }
+    }
+    func testDirectoryCandidatesBrowseWithoutChangingDraftAndEnterAdopts() async throws {
         let model = try await model()
         let root = model.store.directory
         for path in ["work", "alpha", "alpine/中文 空格 ' &", "beta", ".hidden"] {
@@ -244,80 +269,75 @@ final class CustomCommandModelTests: XCTestCase {
         model.beginCustomEdit(CustomCommand(name: "aiomp", title: "项目", directory: root.appendingPathComponent("work").path, target: "omp"))
         model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
         model.updateInput("../")
+        XCTAssertTrue(model.prompt?.choices.isEmpty == true)
+        XCTAssertTrue(model.handleKey(try event(125, "", .command), isTextEditing: true))
         await model.completionTask?.value
-        XCTAssertEqual(Set(model.prompt?.choices.map { URL(fileURLWithPath: $0.label).lastPathComponent } ?? []), Set(["work", "alpha", "alpine", "beta"]))
-        XCTAssertFalse(model.customDirectoryBrowsing, "进入字段不自动进入浏览")
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertEqual(model.prompt?.choices.first?.detail, "current-directory")
+        XCTAssertEqual(Set(model.prompt?.choices.dropFirst().map { URL(fileURLWithPath: $0.label).lastPathComponent } ?? []), Set(["work", "alpha", "alpine", "beta"]))
+        XCTAssertTrue(model.customDirectoryFocused)
+        XCTAssertFalse(model.isTextInputActive)
+        let alpine = try XCTUnwrap(model.prompt?.choices.firstIndex { $0.label == root.appendingPathComponent("alpine").path + "/" })
+        model.chooseCustomDirectoryCandidate(at: alpine)
+        XCTAssertTrue(model.handleKey(try event(124), isTextEditing: false))
         await model.completionTask?.value
-        XCTAssertTrue(model.customDirectoryBrowsing, "Enter 才进入目录浏览")
-        XCTAssertEqual(model.customField, .directory)
-        let browsingText = model.inputText
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-        XCTAssertFalse(model.customDirectoryBrowsing, "Enter 退出浏览")
-        XCTAssertEqual(model.inputText, browsingText, "Enter 不应用高亮目录，路径保持不变")
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-        await model.completionTask?.value
-        XCTAssertTrue(model.customDirectoryBrowsing, "再次 Enter 回到浏览")
-        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
-        XCTAssertEqual(model.inputText, browsingText, "浏览中方向键只移动候选，不改输入")
-        XCTAssertEqual(model.customField, .directory, "浏览中方向键不切字段")
-        XCTAssertEqual(model.prompt?.selectedChoice, 1)
-        XCTAssertTrue(model.handleKey(try event(126), isTextEditing: true))
-        XCTAssertEqual(model.prompt?.selectedChoice, 0)
-        XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
-        await model.completionTask?.value
-        XCTAssertEqual(model.inputText, root.appendingPathComponent("alpha").path + "/", "Tab 选择并进入目录")
-        XCTAssertTrue(model.customDirectoryBrowsing)
-        XCTAssertTrue(model.handleKey(try event(48, "\t", .shift), isTextEditing: true))
-        await model.completionTask?.value
-        XCTAssertEqual(model.inputText, root.path + "/", "Shift+Tab 返回上一级")
-        XCTAssertEqual(model.prompt?.choices.map(\.label).first, root.appendingPathComponent("alpha").path + "/", "返回后预选刚才的目录")
-        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
-        XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
-        await model.completionTask?.value
+        XCTAssertEqual(model.customDirectoryPath, root.appendingPathComponent("alpine").path + "/")
+        XCTAssertEqual(model.inputText, "../")
+        XCTAssertEqual(model.customDraft?.directory, "../")
+        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: false))
         let chosen = root.appendingPathComponent("alpine/中文 空格 ' &").path
-        XCTAssertEqual(model.inputText, root.appendingPathComponent("alpine").path + "/")
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: false))
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertEqual(model.inputText, chosen)
+        XCTAssertEqual(model.customDraft?.directory, chosen)
+        XCTAssertTrue(model.prompt?.choices.isEmpty == true)
+        XCTAssertTrue(model.isTextInputActive)
         XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
-        await model.completionTask?.value
-        XCTAssertEqual(model.inputText, chosen + "/", "Tab 继续进入子目录")
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-        XCTAssertFalse(model.customDirectoryBrowsing, "Enter 退出浏览并保留 Tab 选中的路径")
-        XCTAssertEqual(model.inputText, chosen + "/")
-        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
-        XCTAssertEqual(model.customField, .target, "字段模式下方向键恢复切字段")
-        XCTAssertEqual(model.customDraft?.directory, chosen + "/")
+        XCTAssertEqual(model.customField, .target)
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertTrue(model.handleKey(try event(48, "\t", .shift), isTextEditing: true))
+        XCTAssertEqual(model.customField, .directory)
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertEqual(model.inputText, chosen)
         XCTAssertTrue(model.customCommands.isEmpty)
-        let before = try await model.customStore.load(reservedNames: LauncherModel.reservedCommandNames)
-        XCTAssertTrue(before.isEmpty)
-        model.saveCustomDraft()
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
         try await wait { !model.customSaving }
-        let after = try await model.customStore.load(reservedNames: LauncherModel.reservedCommandNames)
-        XCTAssertEqual(after.first?.directory, chosen)
-        XCTAssertEqual(after.first?.target, "omp")
+        let saved = try await model.customStore.load(reservedNames: LauncherModel.reservedCommandNames)
+        XCTAssertEqual(saved.first?.directory, chosen)
+        XCTAssertEqual(saved.first?.target, "omp")
     }
 
-    func testEscapeLeavesBrowseWithoutCancellingEditAndTypingResumesFiltering() async throws {
+    func testDirectoryEscapeAndTabDiscardOnlyCandidateBrowsing() async throws {
         let model = try await model()
         let root = model.store.directory
-        for name in ["alpha", "alpine"] { try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("alpha"), withIntermediateDirectories: true)
         model.beginCustomEdit(CustomCommand(name: "aiomp", title: "项目", directory: root.path, target: "omp"))
         model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
         let origin = model.inputText
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-        XCTAssertTrue(model.customDirectoryBrowsing)
-        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
+        for leavingKey in [UInt16(53), UInt16(48)] {
+            model.focusCustomDirectoryChoices()
+            await model.completionTask?.value
+            model.moveCustomDirectoryChoice(1)
+            model.openCustomDirectoryChoice()
+            await model.completionTask?.value
+            XCTAssertEqual(model.inputText, origin)
+            model.updateInput("ignored while candidates own focus")
+            XCTAssertEqual(model.inputText, origin)
+            XCTAssertTrue(model.handleKey(try event(leavingKey), isTextEditing: false))
+            XCTAssertFalse(model.customDirectoryFocused)
+            XCTAssertEqual(model.customDraft?.directory, origin)
+            XCTAssertNotNil(model.prompt)
+            if leavingKey == 48 {
+                XCTAssertEqual(model.customField, .target)
+                XCTAssertTrue(model.handleKey(try event(48, "\t", .shift), isTextEditing: true))
+                XCTAssertFalse(model.customDirectoryFocused)
+            }
+            XCTAssertEqual(model.customField, .directory)
+            XCTAssertEqual(model.inputText, origin)
+        }
+        model.updateInput(origin + "/a")
+        XCTAssertEqual(model.customDraft?.directory, origin + "/a")
         XCTAssertTrue(model.handleKey(try event(53), isTextEditing: true))
-        XCTAssertFalse(model.customDirectoryBrowsing, "Esc 仅退出浏览")
-        XCTAssertEqual(model.inputText, origin, "退出浏览恢复进入前路径")
-        XCTAssertNotNil(model.prompt, "编辑未被取消")
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-        XCTAssertTrue(model.customDirectoryBrowsing)
-        model.updateInput(origin + "a")
-        XCTAssertFalse(model.customDirectoryBrowsing, "字段编辑器键入退出浏览并保留新输入")
-        XCTAssertEqual(model.inputText, origin + "a")
-        XCTAssertTrue(model.handleKey(try event(53), isTextEditing: true))
-        XCTAssertNil(model.prompt, "第二次 Esc 取消整次编辑")
-        XCTAssertFalse(model.customDirectoryBrowsing)
+        XCTAssertNil(model.prompt)
     }
 
     func testDirectoryValidationKeepsInputAndEscapePreservesSavedCommand() async throws {
@@ -341,71 +361,98 @@ final class CustomCommandModelTests: XCTestCase {
         XCTAssertEqual(saved, [original])
     }
 
-    func testDirectoryCandidatesCannotOverwriteNewInputOrAnotherField() async throws {
+    func testDirectoryReadCannotReopenClosedBrowserOrOverwriteNewInput() async throws {
         let model = try await model()
         let root = model.store.directory
         for name in ["alpha", "beta"] { try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true) }
         model.beginCustomEdit(CustomCommand(name: "aiomp", title: "项目", directory: root.path, target: "omp"))
         model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
         model.updateInput("al")
+        model.focusCustomDirectoryChoices()
         let obsolete = model.completionTask
+        model.escape()
         model.updateInput("be")
         await obsolete?.value
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertTrue(model.prompt?.choices.isEmpty == true)
+        XCTAssertEqual(model.inputText, "be")
+        model.focusCustomDirectoryChoices()
         await model.completionTask?.value
-        XCTAssertEqual(model.prompt?.choices.map(\.label), [root.appendingPathComponent("beta").path + "/"])
-        model.updateInput("al")
+        XCTAssertEqual(model.prompt?.choices.filter { $0.detail != "current-directory" }.map(\.label), [root.appendingPathComponent("beta").path + "/"])
+        model.refreshCustomDirectoryChoices()
         let pending = model.completionTask
-        model.moveCustomField(-1)
+        _ = model.handleKey(try event(48, "\t", .shift), isTextEditing: false)
         await pending?.value
         XCTAssertEqual(model.customField, .type)
         XCTAssertTrue(model.prompt?.choices.isEmpty == true)
         XCTAssertFalse(model.customDirectoryLoading)
         model.moveCustomField(1)
-        model.updateInput("be")
+        model.focusCustomDirectoryChoices()
         let cancelled = model.completionTask
         model.escape()
         await cancelled?.value
-        XCTAssertNil(model.prompt)
+        XCTAssertNotNil(model.prompt)
         XCTAssertFalse(model.customDirectoryLoading)
+        XCTAssertTrue(model.prompt?.choices.isEmpty == true)
     }
 
-    func testArrowsSwitchFieldsAndEnterEntersDirectoryBrowse() async throws {
+    func testTabSwitchesFieldsAndArrowsPreserveNativeTextEditing() async throws {
+        let model = try await model()
+        model.beginCustomEdit(CustomCommand(name: "aiomp", title: "项目", directory: model.store.directory.path, target: "omp"))
+        model.updateInput("renamed")
+        for modifiers in [NSEvent.ModifierFlags(), .shift, .option, .command] {
+            for code in [UInt16(125), UInt16(126)] {
+                XCTAssertFalse(model.handleCustomCommandKey(try event(code, "", modifiers), isTextEditing: true))
+                XCTAssertEqual(model.customField, .name)
+                XCTAssertEqual(model.inputText, "renamed")
+            }
+        }
+        XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
+        XCTAssertEqual(model.customField, .title)
+        model.updateInput("未保存标题")
+        XCTAssertTrue(model.handleKey(try event(48, "\t", .shift), isTextEditing: true))
+        XCTAssertEqual(model.inputText, "renamed")
+        XCTAssertEqual(model.customDraft?.title, "未保存标题")
+        XCTAssertTrue(model.customCommands.isEmpty)
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        try await wait { !model.customSaving }
+        XCTAssertEqual(model.customCommands.first?.name, "renamed")
+        XCTAssertEqual(model.customCommands.first?.title, "未保存标题")
+    }
+
+    func testDirectoryActionTabNeverEntersCandidatesAndAcceptClosesThem() async throws {
         let model = try await model()
         let root = model.store.directory
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("alpha"), withIntermediateDirectories: true)
-        model.beginCustomEdit(CustomCommand(name: "aiomp", title: "项目", directory: root.path, target: "omp", terminal: .terminal))
-        let fields = model.customFields
-        _ = model.handleKey(try event(126), isTextEditing: true)
-        XCTAssertEqual(model.customField, .name)
-        for index in 0..<3 {
-            XCTAssertEqual(model.customField, fields[index])
-            XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-            XCTAssertEqual(model.customField, fields[index + 1], "字段模式下 Enter 进入下一字段")
+        let child = root.appendingPathComponent("工作目录")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        model.beginCustomEdit(CustomCommand(name: "browse", title: "目录", type: .directory, directory: root.path, terminal: .finder))
+        for field in model.customFields.dropFirst() {
+            _ = model.handleKey(try event(48, "\t"), isTextEditing: model.isTextInputActive)
+            XCTAssertEqual(model.customField, field)
+            XCTAssertFalse(model.customDirectoryFocused)
         }
+        _ = model.handleKey(try event(48, "\t", .shift), isTextEditing: false)
         XCTAssertEqual(model.customField, .directory)
-        XCTAssertFalse(model.customDirectoryBrowsing, "Enter 到目录字段不会自动进入浏览")
-        let beforeEnter = model.inputText
-        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
-        XCTAssertEqual(model.customField, .target, "字段模式下方向键继续切字段")
-        XCTAssertFalse(model.customDirectoryBrowsing)
-        XCTAssertTrue(model.handleKey(try event(126), isTextEditing: true))
+        XCTAssertTrue(model.isTextInputActive)
+        XCTAssertTrue(model.prompt?.choices.isEmpty == true)
+        _ = model.handleKey(try event(125, "", .command), isTextEditing: true)
+        await model.completionTask?.value
+        _ = model.handleKey(try event(125), isTextEditing: false)
+        _ = model.handleKey(try event(36), isTextEditing: false)
         XCTAssertEqual(model.customField, .directory)
-        XCTAssertEqual(model.inputText, beforeEnter, "切换字段不改动目录输入")
-        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
-        XCTAssertTrue(model.customDirectoryBrowsing, "在工作目录字段按 Enter 才进入浏览")
-        XCTAssertEqual(model.customField, .directory)
-        XCTAssertEqual(model.inputText, beforeEnter)
-        let browsingText = model.inputText
-        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
-        XCTAssertEqual(model.inputText, browsingText, "浏览中方向键选候选，不改输入")
-        XCTAssertEqual(model.customField, .directory, "浏览中方向键不改字段")
-        XCTAssertEqual(model.customDraft?.type, .terminal)
-        XCTAssertEqual(model.customDraft?.terminal, .terminal)
-        XCTAssertTrue(model.handleKey(try event(53), isTextEditing: true))
-        XCTAssertFalse(model.customDirectoryBrowsing)
-        XCTAssertEqual(model.inputText, beforeEnter)
-        _ = model.handleKey(try event(53), isTextEditing: true)
-        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.inputText, child.path)
+        XCTAssertTrue(model.isTextInputActive)
+        XCTAssertTrue(model.prompt?.choices.isEmpty == true)
+        _ = model.handleKey(try event(48, "\t"), isTextEditing: true)
+        XCTAssertEqual(model.customField, .terminal)
+        XCTAssertFalse(model.customDirectoryFocused)
+        _ = model.handleKey(try event(48, "\t", .shift), isTextEditing: false)
+        _ = model.handleKey(try event(125, "", .command), isTextEditing: true)
+        _ = model.handleKey(try event(48, "\t", .shift), isTextEditing: false)
+        XCTAssertEqual(model.customField, .type)
+        XCTAssertEqual(model.customDraft?.directory, child.path)
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertTrue(model.customCommands.isEmpty)
     }
 
     func testUnavailableSavedTerminalIsPreservedAndExcludedFromAvailableChoices() async throws {
@@ -429,15 +476,17 @@ final class CustomCommandModelTests: XCTestCase {
         XCTAssertEqual(model.customTerminalOptions, [.ghostty, .terminal, .finder])
     }
 
-    func testForeignPromptFromCommandsBufferStaysUsable() async throws {
-        let bookmark = Bookmark(title: "待删", url: "https://example.com/review")
+    func testBookmarkCommandsRejectHiddenObjectsFromCommandsBuffer() async throws {
+        let bookmark = Bookmark(title: "不可见书签", url: "https://example.com/review")
         let model = try await model(BookmarkDocument(bookmarks: [bookmark]))
         model.openCustomCommands()
-        model.runCommand("delete")
-        XCTAssertEqual(model.prompt?.command, "delete")
-        XCTAssertTrue(model.handleKey(try event(16, "y"), isTextEditing: false))
-        try await wait { !model.busy && model.document.bookmarks.isEmpty }
-        XCTAssertNil(model.customExecutionCommand, "不应执行屏幕上选中的自定义命令")
+        for command in ["delete", "edit", "move", "open"] {
+            model.runCommand(command)
+            XCTAssertNil(model.prompt)
+            XCTAssertEqual(model.buffer, .commands)
+            XCTAssertEqual(model.document.bookmarks, [bookmark])
+            XCTAssertNil(model.customExecutionCommand)
+        }
     }
 
     func testFilePromptFromCommandsBufferSubmitsOnce() async throws {
@@ -463,7 +512,7 @@ final class CustomCommandModelTests: XCTestCase {
         XCTAssertTrue((10..<26).contains(model.customIndex), "滚轮后选中项仍在可视窗口内")
     }
 
-    func testAscendPreselectsDirectoryItLeft() async throws {
+    func testAscendPreselectsDirectoryItLeftAndCurrentDirectoryCanBeAdopted() async throws {
         let model = try await model()
         let root = model.store.directory
         for name in ["alpha", "alpine", "beta"] {
@@ -471,47 +520,73 @@ final class CustomCommandModelTests: XCTestCase {
         }
         model.beginCustomEdit(CustomCommand(name: "browse", title: "预选", directory: root.path, target: "omp"))
         model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
-        _ = model.handleKey(try event(36, "\r"), isTextEditing: true)
+        model.focusCustomDirectoryChoices()
         await model.completionTask?.value
-        _ = model.handleKey(try event(125), isTextEditing: true)
-        _ = model.handleKey(try event(125), isTextEditing: true)
-        XCTAssertEqual(model.prompt?.selectedChoice, 2)
-        _ = model.handleKey(try event(48, "\t"), isTextEditing: true)
+        model.moveCustomDirectoryChoice(3)
+        XCTAssertEqual(model.prompt?.selectedChoice, 3)
+        _ = model.handleKey(try event(124), isTextEditing: false)
         await model.completionTask?.value
-        XCTAssertEqual(model.inputText, root.appendingPathComponent("beta").path + "/")
-        _ = model.handleKey(try event(48, "\t", .shift), isTextEditing: true)
+        XCTAssertEqual(model.customDirectoryPath, root.appendingPathComponent("beta").path + "/")
+        XCTAssertEqual(model.inputText, root.path)
+        _ = model.handleKey(try event(123), isTextEditing: false)
         await model.completionTask?.value
-        XCTAssertEqual(model.prompt?.selectedChoice, 2, "返回后预选刚离开的目录")
-        XCTAssertEqual(model.prompt?.choices[2].label, root.appendingPathComponent("beta").path + "/")
+        XCTAssertEqual(model.prompt?.selectedChoice, 3)
+        XCTAssertEqual(model.prompt?.choices[3].label, root.appendingPathComponent("beta").path + "/")
+        model.chooseCustomDirectoryCandidate(at: 0, activate: true)
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertEqual(model.customDraft?.directory, root.path)
+        XCTAssertTrue(model.customCommands.isEmpty)
     }
 
-    func testEscapeTerminatesBackgroundProgram() async throws {
+    func testEscapeReturnsAndOnlyConfirmedStopTerminatesBackgroundProgram() async throws {
         let model = try await model()
         model.openCustomCommands()
-        model.beginCustomEdit()
-        model.customDraft = CustomCommand(name: "slow", title: "长任务", type: .program,
-                                          directory: model.store.directory.path, target: "/bin/sleep",
-                                          arguments: "{args}", terminal: .none)
-        model.showCustomField()
-        model.saveCustomDraft()
-        try await wait { !model.customSaving }
-        let command = try XCTUnwrap(model.customCommands.first)
-        model.executeCustomCommand(command, input: "30")
-        try await wait { model.customExecuting }
+        let command = CustomCommand(name: "slow", title: "长任务", type: .program,
+                                    directory: model.store.directory.path, target: "/bin/sleep", arguments: "30", terminal: .none)
+        defer { if model.customExecuting { model.customExecutor.cancelRunningProgram() } }
+        model.executeCustomCommand(command)
         XCTAssertTrue(model.handleKey(try event(53), isTextEditing: false))
+        XCTAssertEqual(model.customScreen, .list)
+        XCTAssertTrue(model.customExecuting)
+        XCTAssertTrue(model.canStopCustomExecution)
+        XCTAssertEqual(model.customExecutionCommand, command)
+        model.showCustomExecution()
+        XCTAssertEqual(model.customScreen, .execution)
+        model.escapeCustomCommands()
+        XCTAssertTrue(model.customExecuting, "点击返回与 Esc 同样不停止任务")
+        for key in [try event(45, "n"), try event(36, "\r"), try event(53)] {
+            XCTAssertTrue(model.handleKey(try event(47, ".", .command), isTextEditing: false))
+            XCTAssertTrue(model.customStopConfirmation)
+            XCTAssertTrue(model.handleKey(key, isTextEditing: false))
+            XCTAssertFalse(model.customStopConfirmation)
+            XCTAssertTrue(model.customExecuting)
+        }
+        model.requestCustomStop()
+        for (code, text) in [(UInt16(12), "q"), (UInt16(4), "h")] {
+            XCTAssertFalse(LauncherKeyRouter.handle(try event(code, text, .command), model: model, firstResponder: nil))
+            XCTAssertTrue(model.customStopConfirmation)
+            XCTAssertTrue(model.customExecuting)
+        }
+        for (code, text) in [(UInt16(45), "n"), (UInt16(43), ",")] {
+            XCTAssertTrue(model.handleKey(try event(code, text, .command), isTextEditing: false))
+            XCTAssertTrue(model.customStopConfirmation)
+            XCTAssertNil(model.prompt)
+            XCTAssertEqual(model.buffer, .commands)
+        }
+        XCTAssertTrue(model.handleKey(try event(16, "y"), isTextEditing: false))
         try await wait { !model.customExecuting }
         XCTAssertTrue(model.customExecutionFailed)
+        XCTAssertFalse(model.canStopCustomExecution)
+        XCTAssertFalse(model.customStopConfirmation)
         XCTAssertNotNil(model.customExecutionCommand)
     }
 
-    func testHomeProgramCanBeCancelledFromCommandsAndNextCommandRuns() async throws {
+    func testHomeProgramCanBeStoppedFromCommandsAndNextCommandRuns() async throws {
         let model = try await model()
         let slow = CustomCommand(name: "slow", title: "长任务", type: .program,
-                                 directory: model.store.directory.path, target: "/bin/sleep",
-                                 arguments: "30", terminal: .none)
+                                 directory: model.store.directory.path, target: "/bin/sleep", arguments: "30", terminal: .none)
         let next = CustomCommand(name: "next", title: "下一条", type: .program,
-                                 directory: model.store.directory.path, target: "/usr/bin/printf",
-                                 arguments: "done", terminal: .none)
+                                 directory: model.store.directory.path, target: "/usr/bin/printf", arguments: "done", terminal: .none)
         model.customCommands = [slow, next]
         defer { if model.customExecuting { model.customExecutor.cancelRunningProgram() } }
         model.runCommand("slow")
@@ -520,9 +595,8 @@ final class CustomCommandModelTests: XCTestCase {
         model.runCommand("commands")
         XCTAssertEqual(model.buffer, .commands)
         XCTAssertEqual(model.customScreen, .execution)
-        XCTAssertEqual(model.customExecutionCommand?.name, "slow")
-        XCTAssertEqual(model.bufferOffset, 0)
-        XCTAssertTrue(model.handleKey(try event(53), isTextEditing: false))
+        model.requestCustomStop()
+        model.confirmCustomStop()
         try await wait { !model.customExecuting }
         XCTAssertTrue(model.customExecutionFailed)
         model.runCommand("next")
@@ -532,6 +606,223 @@ final class CustomCommandModelTests: XCTestCase {
         XCTAssertFalse(model.customExecutionFailed)
         model.runCommand("commands")
         XCTAssertEqual(model.customScreen, .list)
+        model.showCustomExecution()
+        XCTAssertEqual(model.customScreen, .execution)
+        XCTAssertEqual(model.customExecutionOutput, ["done"])
+    }
+
+    func testSearchRetainsFocusRunsSelectionAndEscapeClearsFilter() async throws {
+        let model = try await model()
+        model.customCommands = ["alpha", "alpine"].map {
+            CustomCommand(name: $0, title: $0, type: .program, directory: model.store.directory.path,
+                          target: "/usr/bin/printf", arguments: $0, terminal: .none)
+        }
+        model.openCustomCommands()
+        model.startCustomSearch()
+        model.updateInput("al")
+        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
+        XCTAssertEqual(model.inputKind, .search)
+        XCTAssertEqual(model.customIndex, 1)
+        model.updateInput("alp")
+        XCTAssertEqual(model.customQuery, "alp")
+        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: true))
+        XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
+        XCTAssertNil(model.inputKind)
+        XCTAssertEqual(model.selectedCustomCommand?.name, "alpine")
+        XCTAssertTrue(model.handleKey(try event(48, "\t", .shift), isTextEditing: false))
+        XCTAssertEqual(model.inputKind, .search)
+        XCTAssertEqual(model.inputText, "alp")
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertEqual(model.customScreen, .execution)
+        try await wait { !model.customExecuting }
+        XCTAssertEqual(model.customExecutionOutput, ["alpine"])
+        model.escapeCustomCommands()
+        XCTAssertEqual(model.customQuery, "alp")
+        model.escapeCustomCommands()
+        XCTAssertEqual(model.customQuery, "")
+        XCTAssertEqual(model.buffer, .commands)
+        model.startCustomSearch()
+        model.updateInput("no-match")
+        XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
+        XCTAssertEqual(model.inputKind, .search)
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertFalse(model.customExecuting)
+        XCTAssertEqual(model.customScreen, .list)
+        XCTAssertTrue(model.handleKey(try event(53), isTextEditing: true))
+        XCTAssertNil(model.inputKind)
+        XCTAssertEqual(model.customQuery, "")
+    }
+
+    func testDuplicateUsesCommandDAndBareCDoesNothing() async throws {
+        let model = try await model()
+        try await add(model)
+        XCTAssertFalse(model.handleCustomCommandKey(try event(8, "c"), isTextEditing: false))
+        XCTAssertNil(model.customDraft)
+        XCTAssertFalse(model.handleCustomCommandKey(try event(2, "d", [.command, .option]), isTextEditing: false))
+        XCTAssertTrue(model.handleKey(try event(2, "d", .command), isTextEditing: false))
+        XCTAssertEqual(model.customDraft?.name, "literal-copy")
+        XCTAssertNil(model.customOriginalName)
+        XCTAssertEqual(model.customCommands.count, 1)
+        model.escapeCustomCommands()
+        model.startCustomSearch()
+        XCTAssertFalse(model.handleCustomCommandKey(try event(2, "d", .command), isTextEditing: true))
+        XCTAssertNil(model.customDraft)
+        model.escapeCustomCommands()
+        XCTAssertTrue(model.handleKey(try event(0, "a"), isTextEditing: false))
+        XCTAssertEqual(model.customScreen, .edit)
+        model.escapeCustomCommands()
+        XCTAssertTrue(model.handleKey(try event(45, "n", .command), isTextEditing: false))
+        XCTAssertEqual(model.customScreen, .edit)
+    }
+
+    func testCommandEnterDoesNotAdoptHighlightedDirectory() async throws {
+        let model = try await model()
+        let root = model.store.directory
+        let child = root.appendingPathComponent("未采纳")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        model.beginCustomEdit(CustomCommand(name: "browse", title: "保留草稿", type: .directory, directory: root.path, terminal: .finder))
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
+        model.focusCustomDirectoryChoices()
+        await model.completionTask?.value
+        model.moveCustomDirectoryChoice(1)
+        model.openCustomDirectoryChoice()
+        await model.completionTask?.value
+        XCTAssertEqual(model.customDirectoryPath, child.path + "/")
+        XCTAssertTrue(model.handleKey(try event(36, "\r", .command), isTextEditing: false))
+        try await wait { !model.customSaving }
+        XCTAssertEqual(model.customCommands.first?.directory, root.path)
+        XCTAssertFalse(model.customDirectoryFocused)
+    }
+
+    func testValidationFocusesInvalidFieldAndPreservesOtherDrafts() async throws {
+        let model = try await model()
+        try await add(model)
+        model.beginCustomEdit(try XCTUnwrap(model.selectedCustomCommand))
+        model.updateInput("renamed")
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
+        model.updateInput("not-a-directory")
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .title)))
+        model.updateInput("新标题")
+        model.saveCustomDraft()
+        XCTAssertEqual(model.customField, .directory)
+        XCTAssertEqual(model.inputText, "not-a-directory")
+        XCTAssertEqual(model.customDraft?.name, "renamed")
+        XCTAssertEqual(model.customDraft?.title, "新标题")
+        XCTAssertNotNil(model.prompt?.error)
+        model.updateInput(model.store.directory.path)
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .name)))
+        model.updateInput("1invalid")
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .title)))
+        model.saveCustomDraft()
+        XCTAssertEqual(model.customField, .name)
+        XCTAssertEqual(model.inputText, "1invalid")
+        XCTAssertEqual(model.customDraft?.title, "新标题")
+        XCTAssertEqual(model.customCommands.first?.name, "literal")
+    }
+
+    func testOutputPagingMovesOneVisibleScreenAndExternalHandoffsCannotStop() async throws {
+        let model = try await model()
+        model.openCustomCommands()
+        model.customExecutionCommand = CustomCommand(name: "terminal", title: "外部终端", directory: model.store.directory.path, target: "echo")
+        model.customExecutionOutput = (0..<60).map { "行 \($0)" }
+        model.showCustomExecution()
+        XCTAssertTrue(model.handleKey(try event(121), isTextEditing: false))
+        XCTAssertEqual(model.bufferOffset, LauncherModel.calcVisibleRows)
+        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: false))
+        XCTAssertEqual(model.bufferOffset, LauncherModel.calcVisibleRows + 1)
+        XCTAssertTrue(model.handleKey(try event(116), isTextEditing: false))
+        XCTAssertEqual(model.bufferOffset, 1)
+        for command in [
+            CustomCommand(name: "terminal", title: "终端", target: "echo"),
+            CustomCommand(name: "web", title: "网页", type: .url, target: "https://example.com"),
+            CustomCommand(name: "finder", title: "目录", type: .directory, terminal: .finder)
+        ] {
+            model.customExecutionCommand = command
+            model.customExecuting = true
+            XCTAssertFalse(model.canStopCustomExecution)
+            model.requestCustomStop()
+            XCTAssertFalse(model.customStopConfirmation)
+            model.customExecuting = false
+        }
+    }
+
+    func testClickActionsShareSelectionAcceptanceAndStopContracts() async throws {
+        let model = try await model()
+        try await add(model)
+        let view = LauncherView(model: model)
+        model.startCustomSearch()
+        model.updateInput("lit")
+        view.performCustomAction(.row(0), activate: false)
+        XCTAssertNil(model.inputKind)
+        XCTAssertEqual(model.customQuery, "lit")
+        view.performCustomAction(.duplicate, activate: false)
+        XCTAssertEqual(model.customDraft?.name, "literal-copy")
+        let child = model.store.directory.appendingPathComponent("选择目录")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .directory)))
+        view.performCustomAction(.browseDirectory, activate: false)
+        await model.completionTask?.value
+        let choice = try XCTUnwrap(model.prompt?.choices.firstIndex { $0.label == child.path + "/" })
+        let origin = model.inputText
+        view.performCustomAction(.directoryChoice(choice), activate: false)
+        XCTAssertTrue(model.customDirectoryFocused)
+        XCTAssertEqual(model.inputText, origin)
+        view.perform(.input)
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertTrue(model.isTextInputActive)
+        XCTAssertEqual(model.inputText, origin)
+        view.performCustomAction(.browseDirectory, activate: false)
+        await model.completionTask?.value
+        view.performCustomAction(.directoryChoice(choice), activate: true)
+        XCTAssertFalse(model.customDirectoryFocused)
+        XCTAssertEqual(model.inputText, child.path)
+        XCTAssertEqual(model.customCommands.count, 1)
+        view.performCustomAction(.cancel, activate: false)
+        let slow = CustomCommand(name: "slow", title: "点击停止", type: .program,
+                                 directory: model.store.directory.path, target: "/bin/sleep", arguments: "30", terminal: .none)
+        defer { if model.customExecuting { model.customExecutor.cancelRunningProgram() } }
+        model.executeCustomCommand(slow)
+        view.performCustomAction(.cancel, activate: false)
+        XCTAssertEqual(model.customScreen, .list)
+        XCTAssertTrue(model.customExecuting)
+        view.performCustomAction(.results, activate: false)
+        XCTAssertEqual(model.customScreen, .execution)
+        view.performCustomAction(.stop, activate: false)
+        XCTAssertTrue(model.customStopConfirmation)
+        view.perform(.input)
+        XCTAssertNil(model.inputKind)
+        XCTAssertTrue(model.customStopConfirmation)
+        view.performCustomAction(.edit, activate: false)
+        XCTAssertNil(model.customDraft)
+        view.performCustomAction(.cancelStop, activate: false)
+        XCTAssertTrue(model.customExecuting)
+        view.performCustomAction(.stop, activate: false)
+        view.performCustomAction(.confirmStop, activate: false)
+        try await wait { !model.customExecuting }
+        XCTAssertTrue(model.customExecutionFailed)
+        view.performCustomAction(.cancel, activate: false)
+        view.performCustomAction(.row(0), activate: true)
+        XCTAssertEqual(model.customScreen, .execution)
+        try await wait { !model.customExecuting }
+        XCTAssertEqual(model.customExecutionCommand?.name, "literal")
+    }
+
+    func testFailedStartupDoesNotLeaveStopQueuedForNextProgram() async throws {
+        let model = try await model()
+        model.openCustomCommands()
+        let missing = CustomCommand(name: "missing", title: "启动失败", type: .program,
+                                    directory: model.store.directory.path, target: model.store.directory.appendingPathComponent("missing").path,
+                                    terminal: .none)
+        model.executeCustomCommand(missing)
+        model.requestCustomStop()
+        model.confirmCustomStop()
+        try await wait { !model.customExecuting }
+        XCTAssertTrue(model.customExecutionFailed)
+        let next = CustomCommand(name: "next", title: "下一条", type: .program,
+                                 directory: model.store.directory.path, target: "/bin/sleep", arguments: "0.1", terminal: .none)
+        model.executeCustomCommand(next)
+        try await wait { !model.customExecuting }
+        XCTAssertFalse(model.customExecutionFailed)
     }
 
     func testPathChoicesListTypedDotDirectory() async throws {

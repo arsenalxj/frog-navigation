@@ -59,9 +59,9 @@ final class LauncherModelTests: XCTestCase {
     private func addThroughTitle(_ model: LauncherModel, url: String = "example.org", title: String = "新增书签") {
         model.addBookmark()
         model.updateInput(url)
-        model.submitInput()
+        model.switchPromptField(1)
         model.updateInput(title)
-        model.submitInput()
+        model.switchPromptField(1)
     }
 
     func testFolderRowsExpandInPlaceWithStableRootOrder() async throws {
@@ -88,17 +88,18 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.items.map(\.id), [group.id, root.id])
     }
 
-    func testTabTogglesSelectedFolderAndIsConsumedElsewhere() async throws {
+    func testTabDoesNotToggleFolderAndArrowsDo() async throws {
         let group = BookmarkGroup(name: "工作")
-        let root = Bookmark(title: "根书签", url: "https://root.example", order: 0)
-        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [root]))
-        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
-        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
-        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
+        let child = Bookmark(title: "子项", url: "https://child.example", groupId: group.id)
+        let model = try await makeModel(BookmarkDocument(groups: [group], bookmarks: [child]))
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: false)
         XCTAssertFalse(model.expandedGroupIDs.contains(group.id))
-        model.selectItem(at: 1)
-        XCTAssertTrue(model.handleKey(try key(48, "\t"), isTextEditing: false))
-        XCTAssertEqual(model.selectedIndex, 1)
+        _ = model.handleKey(try key(124), isTextEditing: false)
+        XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
+        model.moveCursor(1)
+        _ = model.handleKey(try key(123), isTextEditing: false)
+        XCTAssertFalse(model.expandedGroupIDs.contains(group.id))
+        XCTAssertEqual(model.items[model.selectedIndex].id, group.id)
     }
 
     func testEmptyRootHasNoVirtualRowAndExpandedFolderStaysEmpty() async throws {
@@ -115,8 +116,8 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.items.map(\.kind), [.folder])
         model.addBookmark()
         model.updateInput("folder.example")
-        model.submitInput()
-        model.submitInput()
+        model.switchPromptField(1)
+        model.switchPromptField(1)
         try choose(group.id, in: model)
         model.submitInput()
         try await settle { !model.busy }
@@ -128,17 +129,20 @@ final class LauncherModelTests: XCTestCase {
         let original = try saved(model)
         addThroughTitle(model, title: "未提交标题")
         try choose("__new__", in: model)
-        model.submitInput()
+        model.switchPromptField(1)
+        model.switchPromptField(1)
         model.updateInput("未提交文件夹")
         XCTAssertTrue(model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true))
         XCTAssertEqual(model.prompt?.field, "location")
-        model.submitInput()
+        XCTAssertEqual(model.prompt?.choicesFocused, true)
+        model.switchPromptField(1)
         XCTAssertEqual(model.inputText, "未提交文件夹")
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         XCTAssertEqual(model.inputText, "未提交标题")
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
-        XCTAssertEqual(model.inputText, "https://example.org")
+        XCTAssertEqual(model.inputText, "example.org")
         model.escape()
         XCTAssertNil(model.prompt)
         XCTAssertEqual(try saved(model), original)
@@ -148,7 +152,8 @@ final class LauncherModelTests: XCTestCase {
         let model = try await makeModel()
         addThroughTitle(model)
         try choose("__new__", in: model)
-        model.submitInput()
+        model.switchPromptField(1)
+        model.switchPromptField(1)
         XCTAssertTrue(model.document.groups.isEmpty)
         model.updateInput("新工作目录")
         model.submitInput()
@@ -170,9 +175,9 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.prompt?.field, "url")
         XCTAssertNotNil(model.prompt?.error)
         model.updateInput("new.example")
-        model.submitInput()
+        model.switchPromptField(1)
         model.updateInput("保留标题")
-        model.submitInput()
+        model.switchPromptField(1)
         let file = model.store.directory.appendingPathComponent("bookmarks.json")
         let corrupted = Data("not-json".utf8)
         try corrupted.write(to: file, options: .atomic)
@@ -195,11 +200,11 @@ final class LauncherModelTests: XCTestCase {
         model.updateInput("新的标题")
         XCTAssertEqual(model.inputRevision, revision)
         XCTAssertFalse(model.handleKey(try key(51, "\u{7f}"), isTextEditing: true))
-        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         XCTAssertEqual(model.prompt?.field, "url")
         XCTAssertGreaterThan(model.inputRevision, revision)
         model.updateInput("changed.example/path")
-        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
         XCTAssertEqual(model.inputText, "新的标题")
         XCTAssertEqual(try saved(model), document)
         model.submitInput()
@@ -214,7 +219,7 @@ final class LauncherModelTests: XCTestCase {
         try select(document.bookmarks[0].id, in: model)
         model.runCommand("edit")
         model.updateInput("")
-        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         model.updateInput("new.example")
         model.submitInput()
         XCTAssertEqual(model.prompt?.field, "title")
@@ -256,17 +261,20 @@ final class LauncherModelTests: XCTestCase {
         try select(document.bookmarks[0].id, in: model)
         model.runCommand("move")
         try choose("__new__", in: model)
-        model.submitInput()
+        model.switchPromptField(1)
+        model.switchPromptField(1)
         model.updateInput("新归属")
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
-        model.submitInput()
+        XCTAssertEqual(model.prompt?.choicesFocused, true)
+        model.switchPromptField(1)
         XCTAssertEqual(model.inputText, "新归属")
         XCTAssertEqual(try saved(model), document)
         model.escape()
         XCTAssertTrue(model.document.groups.isEmpty)
         model.runCommand("move")
         try choose("__new__", in: model)
-        model.submitInput()
+        model.switchPromptField(1)
+        model.switchPromptField(1)
         model.updateInput("最终归属")
         model.submitInput()
         try await settle { !model.busy }
@@ -281,7 +289,8 @@ final class LauncherModelTests: XCTestCase {
         try select(document.bookmarks[0].id, in: model)
         model.runCommand("move")
         try choose("__new__", in: model)
-        model.submitInput()
+        model.switchPromptField(1)
+        model.switchPromptField(1)
         model.updateInput("不能成为空壳")
         try await model.store.apply { try $0.deleteBookmark(id: document.bookmarks[0].id) }
         try await settle { !model.busy }
@@ -352,17 +361,23 @@ final class LauncherModelTests: XCTestCase {
                 model.updateInput("example.com")
                 XCTAssertFalse(model.handleKey(try key(14, "e"), isTextEditing: true))
                 XCTAssertTrue(model.handleKey(try key(code), isTextEditing: true))
+                if code != 48 {
+                    XCTAssertEqual(model.inputKind, .search)
+                    model.updateInput("example.com/")
+                    _ = model.handleKey(try key(code), isTextEditing: true)
+                    _ = model.handleKey(try key(48), isTextEditing: true)
+                }
                 XCTAssertNil(model.inputKind)
-                XCTAssertEqual(model.query, "example.com")
+                XCTAssertEqual(model.query, code == 48 ? "example.com" : "example.com/")
                 XCTAssertEqual(model.selectedIndex, index)
                 XCTAssertTrue(model.handleKey(try key(0, letter, modifiers: letter == "D" ? .shift : []), isTextEditing: false))
                 XCTAssertEqual(model.prompt?.command, command)
                 XCTAssertEqual(model.draft.id, document.bookmarks[index].id)
                 model.escape()
-                XCTAssertEqual(model.query, "example.com")
-                XCTAssertTrue(model.handleKey(try key(44, "/"), isTextEditing: false))
+                let query = model.query
+                XCTAssertTrue(model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: false))
                 XCTAssertEqual(model.inputKind, .search)
-                XCTAssertEqual(model.inputText, "example.com")
+                XCTAssertEqual(model.inputText, query)
             }
         }
     }
@@ -694,29 +709,19 @@ final class LauncherModelTests: XCTestCase {
     }
 
 
-    func testEscapeCollapsesParentThenAllThenDismisses() async throws {
+    func testEscapeHidesWithoutChangingExpandedFolders() async throws {
         let a = BookmarkGroup(name: "A", order: 1)
         let b = BookmarkGroup(name: "B", order: 2)
         let child = Bookmark(title: "子书签", url: "https://child.example", groupId: a.id)
         let model = try await makeModel(BookmarkDocument(groups: [a, b], bookmarks: [child]))
-        model.activateSelection()
-        XCTAssertTrue(model.expandedGroupIDs.contains(a.id))
-        model.moveCursor(1)
-        XCTAssertEqual(model.items[model.selectedIndex].id, child.id)
-        model.escape()
-        XCTAssertFalse(model.expandedGroupIDs.contains(a.id))
-        XCTAssertEqual(model.items[model.selectedIndex].id, a.id)
-        model.activateSelection()
         model.toggleAllExpanded()
-        XCTAssertEqual(model.expandedGroupIDs, Set([a.id, b.id]))
-        model.escape()
-        XCTAssertEqual(model.expandedGroupIDs, Set([b.id]))
-        model.escape()
-        XCTAssertTrue(model.expandedGroupIDs.isEmpty)
+        try select(child.id, in: model)
         var hidden = false
         model.dismissWindow = { hidden = true }
         model.escape()
         XCTAssertTrue(hidden)
+        XCTAssertEqual(model.expandedGroupIDs, Set([a.id, b.id]))
+        XCTAssertEqual(model.items[model.selectedIndex].id, child.id)
     }
 
     func testExpandedFoldersPersistAndPruneDeletedGroups() async throws {
@@ -775,8 +780,8 @@ final class LauncherModelTests: XCTestCase {
         model.openSettings()
         XCTAssertEqual(model.modeLabel, "BUFFER:SETTINGS")
         let initial = model.settingsRows
-        for character in ["l", "h", "r", "c", "a", "n", "e", "m", "D", "C", "o", "1", "j", "k", "g", "G", "/", "?", ","] {
-            XCTAssertTrue(model.handleKey(try key(0, character), isTextEditing: false))
+        for character in ["l", "h", "r", "c", "a", "n", "e", "m", "D", "C", "o", "1"] {
+            _ = model.handleKey(try key(0, character), isTextEditing: false)
         }
         for modifiers: NSEvent.ModifierFlags in [.command, .control, .option] {
             XCTAssertFalse(model.handleKey(try key(0, "a", modifiers: modifiers), isTextEditing: false))
@@ -801,8 +806,8 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.modeLabel, "BUFFER:HELP")
         model.runCommand("mkdir")
         XCTAssertEqual(model.buffer, .help)
-        XCTAssertEqual(model.modeLabel, "PROMPT")
-        model.escape()
+        XCTAssertNil(model.prompt)
+        XCTAssertEqual(model.logs.last?.level, .error)
         XCTAssertEqual(model.modeLabel, "BUFFER:HELP")
         model.startSearch()
         XCTAssertEqual(model.modeLabel, "SEARCH")
@@ -845,6 +850,49 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.query, "")
         XCTAssertTrue(model.expandedGroupIDs.contains(group.id))
         XCTAssertEqual(model.items[model.selectedIndex].id, group.id)
+    }
+
+    func testGroupNavigationDropsOldCalculatorOriginForNextAuxiliaryPage() async throws {
+        let group = BookmarkGroup(name: "工作")
+        let model = try await makeModel(BookmarkDocument(groups: [group]))
+        for command in ["group root", "group 工作"] {
+            model.openCalc()
+            model.updateInput("12*7")
+            model.startCommand()
+            model.updateInput("help")
+            model.submitInput()
+            model.startCommand()
+            model.updateInput(command)
+            model.submitInput()
+            XCTAssertNil(model.buffer)
+            model.openSettings()
+            model.escape()
+            XCTAssertNil(model.buffer)
+            XCTAssertNil(model.inputKind)
+            XCTAssertEqual(model.calcExpression, "12*7")
+        }
+    }
+
+    func testAuxiliaryCommandRejectionKeepsDataAndExposesFeedbackUntilNextAction() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
+        for buffer in [TerminalBuffer.help, .settings, .log, .job] {
+            model.openBuffer(buffer)
+            model.startCommand()
+            model.updateInput("delete")
+            model.submitInput()
+            XCTAssertEqual(model.buffer, buffer)
+            XCTAssertNil(model.prompt)
+            XCTAssertNotNil(model.bufferFeedback)
+            XCTAssertEqual(try saved(model), document)
+            model.startCommand()
+            XCTAssertNil(model.bufferFeedback)
+            model.escape()
+            model.runCommand("add")
+            XCTAssertNotNil(model.bufferFeedback)
+            model.escape()
+            XCTAssertNil(model.bufferFeedback)
+        }
     }
 
     func testFunctionKeyF1NoLongerOpensBuffer() async throws {
@@ -932,72 +980,84 @@ final class LauncherModelTests: XCTestCase {
         model.updateInput("1+2")
         XCTAssertNil(model.calcError)
         XCTAssertNil(model.calcFeedback)
-        XCTAssertTrue(model.handleKey(try key(24, "="), isTextEditing: true))
+        XCTAssertFalse(model.handleKey(try key(24, "="), isTextEditing: true))
+        XCTAssertTrue(model.calcHistory.isEmpty)
+        XCTAssertTrue(model.handleKey(try key(36), isTextEditing: true))
         XCTAssertEqual(model.calcHistory.count, 1)
         XCTAssertEqual(model.calcHistory.first?.value, "3")
     }
 
-    func testCalculatorHistoryMovesInListOrderAndCopiesSelectedResult() async throws {
+    func testCalculatorHistoryBrowsingPreservesDraftUntilExplicitLoad() async throws {
         let model = try await makeModel()
         model.runCommand("calc")
         model.updateInput("12*(8-3)")
         model.submitCalc()
         model.updateInput("7*6")
         model.submitCalc()
-        XCTAssertEqual(model.calcHistory.map(\.value), ["42", "60"])
-        XCTAssertNil(model.calcHistoryIndex)
-        XCTAssertTrue(model.handleKey(try key(126), isTextEditing: true))
-        XCTAssertEqual(model.calcHistoryIndex, 0)
-        XCTAssertEqual(model.inputText, "7*6")
-        XCTAssertTrue(model.handleKey(try key(125), isTextEditing: true))
+        model.updateInput("123+")
+        XCTAssertFalse(model.handleKey(try key(126), isTextEditing: true))
+        _ = model.handleKey(try key(48), isTextEditing: true)
+        _ = model.handleKey(try key(125), isTextEditing: false)
         XCTAssertEqual(model.calcHistoryIndex, 1)
-        XCTAssertEqual(model.inputText, "12*(8-3)")
-        XCTAssertTrue(model.handleKey(try key(126), isTextEditing: true))
-        XCTAssertEqual(model.inputText, "7*6")
-        model.selectCalcEntry(at: 1)
-        XCTAssertEqual(model.calcHistoryIndex, 1)
-        NSPasteboard.general.clearContents()
-        XCTAssertTrue(model.handleKey(try key(8, "c"), isTextEditing: true))
+        XCTAssertEqual(model.calcExpression, "123+")
+        XCTAssertTrue(model.handleKey(try key(8, "c", modifiers: .command), isTextEditing: false))
         XCTAssertEqual(NSPasteboard.general.string(forType: .string), "60")
-        XCTAssertEqual(model.calcFeedback, "✓ 已复制 60")
+        model.escape()
+        XCTAssertEqual(model.inputText, "123+")
+        XCTAssertEqual(model.inputKind, .calc)
+        _ = model.handleKey(try key(48), isTextEditing: true)
+        _ = model.handleKey(try key(36), isTextEditing: false)
         XCTAssertEqual(model.inputText, "12*(8-3)")
+        XCTAssertEqual(model.calcHistory.count, 2)
+        XCTAssertEqual(model.inputKind, .calc)
     }
 
     func testCalculatorCopyHandlesLiveAndMissingResults() async throws {
         let model = try await makeModel()
         model.runCommand("calc")
         NSPasteboard.general.clearContents()
-        XCTAssertTrue(model.handleKey(try key(8, "c"), isTextEditing: true))
+        XCTAssertTrue(model.handleKey(try key(8, "c", modifiers: .command), isTextEditing: true))
         XCTAssertEqual(model.calcFeedback, "✗ 没有可复制的结果")
         model.updateInput("12*(8-3)")
-        XCTAssertTrue(model.handleKey(try key(8, "c"), isTextEditing: true))
+        XCTAssertTrue(model.handleKey(try key(8, "c", modifiers: .command), isTextEditing: true))
         XCTAssertEqual(NSPasteboard.general.string(forType: .string), "60")
         XCTAssertEqual(model.calcFeedback, "✓ 已复制 60")
         XCTAssertEqual(model.inputText, "12*(8-3)")
     }
 
-    func testCalculatorPromptCancelRestoresInputAndExpression() async throws {
-        let model = try await makeModel()
+    func testCalculatorRejectsHiddenBookmarkCommandsWithoutLosingDraft() async throws {
+        let document = fixture(count: 1)
+        let model = try await makeModel(document)
         model.runCommand("calc")
         model.updateInput("5*5")
-        model.runCommand("mkdir")
-        XCTAssertEqual(model.prompt?.command, "mkdir")
-        model.escape()
-        XCTAssertEqual(model.buffer, .calc)
-        XCTAssertEqual(model.inputKind, .calc)
-        XCTAssertEqual(model.inputText, "5*5")
+        for command in ["add", "edit", "rename", "delete", "move", "open", "mkdir 新目录"] {
+            model.runCommand(command)
+            XCTAssertNil(model.prompt)
+            XCTAssertEqual(model.buffer, .calc)
+            XCTAssertEqual(model.inputKind, .calc)
+            XCTAssertEqual(model.inputText, "5*5")
+            XCTAssertEqual(try saved(model), document)
+        }
     }
 
-    func testCalculatorPromptSubmissionRestoresInputAfterAsyncSave() async throws {
+    func testAuxiliaryBuffersReturnToCalculatorHistoryFocus() async throws {
         let model = try await makeModel()
-        model.runCommand("calc")
+        model.openCalc()
         model.updateInput("6*7")
-        model.runCommand("mkdir 临时")
-        try await settle { !model.busy }
+        model.submitCalc()
+        model.updateInput("8+")
+        model.selectCalcEntry(at: 0)
+        model.startCommand()
+        model.updateInput("help")
+        model.submitInput()
+        model.openSettings()
+        model.escape()
         XCTAssertEqual(model.buffer, .calc)
-        XCTAssertEqual(model.inputKind, .calc)
-        XCTAssertEqual(model.inputText, "6*7")
-        XCTAssertTrue(model.document.groups.contains { $0.name == "临时" })
+        XCTAssertTrue(model.calcHistoryFocused)
+        XCTAssertNil(model.inputKind)
+        XCTAssertEqual(model.calcExpression, "8+")
+        model.escape()
+        XCTAssertEqual(model.inputText, "8+")
     }
 
     func testCalculatorCommandErrorsAndClearUseVisibleFeedback() async throws {
@@ -1033,6 +1093,10 @@ final class LauncherModelTests: XCTestCase {
         model.updateInput("log")
         model.escape()
         XCTAssertEqual(model.buffer, .calc)
+        XCTAssertEqual(model.inputKind, .calc)
+        XCTAssertEqual(model.inputText, "5*5")
+        model.startCommand()
+        model.submitInput()
         XCTAssertEqual(model.inputKind, .calc)
         XCTAssertEqual(model.inputText, "5*5")
 

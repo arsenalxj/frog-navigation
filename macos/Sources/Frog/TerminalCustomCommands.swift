@@ -72,22 +72,33 @@ extension LauncherModel {
     }
 
     func refreshCustomDirectoryChoices() {
-        guard isCustomDirectoryEditing else { return }
+        guard isCustomDirectoryEditing, customDirectoryFocused else { return }
         completionTask?.cancel()
         completionGeneration &+= 1
         let generation = completionGeneration
-        let text = inputText
+        let text = customDirectoryPath
         let base = customDirectoryBase
         prompt?.choices = []
         prompt?.selectedChoice = 0
         customDirectoryLoading = true
         completionTask = Task { [weak self] in
             let choices = await Task.detached(priority: .userInitiated) {
-                let normalized = ["~", ".", ".."].contains(text) ? text + "/" : text
-                return Self.pathChoices(text: normalized, command: "commands-directory", base: base)
+                let expanded = (text as NSString).expandingTildeInPath
+                let url = (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded, isDirectory: true)
+                    : base.appendingPathComponent(expanded, isDirectory: true)).standardizedFileURL
+                var directory: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue
+                let query = exists ? url.path + "/" : text
+                let current = exists ? url : url.deletingLastPathComponent()
+                var choices = Self.pathChoices(text: query, command: "commands-directory", base: base)
+                if FileManager.default.fileExists(atPath: current.path, isDirectory: &directory), directory.boolValue {
+                    choices.insert(TerminalChoice(id: current.path, label: current.path, detail: "current-directory"), at: 0)
+                }
+                return choices
             }.value
             guard let self, !Task.isCancelled, completionGeneration == generation,
-                  isCustomDirectoryEditing, inputText == text else { return }
+                  isCustomDirectoryEditing, customDirectoryFocused,
+                  customDirectoryPath == text else { return }
             prompt?.choices = choices
             if let target = customDirectoryPreselectPath,
                let index = choices.firstIndex(where: { $0.label == target || $0.label == target + "/" }) {
@@ -101,88 +112,80 @@ extension LauncherModel {
     }
 
     var customDirectoryHint: String {
-        customDirectoryBrowsing
-            ? "↑↓ 移动 · Tab 选择并进入 · ⇧Tab 上一级 · Enter 退出浏览 · Esc 还原"
-            : "↑↓ 切字段 · Enter 浏览目录 · 也可直接输入路径"
+        customDirectoryFocused
+            ? "↑↓ 选择 · → 进入 / ← 上级 · Enter 采纳并收起 · Tab / ⇧Tab 切字段 · Esc 取消浏览"
+            : "Tab / ⇧Tab 切字段 · ⌘↓ 浏览目录 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
     }
 
-    func beginCustomDirectoryBrowse() {
-        guard isCustomDirectoryEditing, !customSaving else { return }
-        if !customDirectoryBrowsing {
-            customDirectoryBrowseOrigin = inputText
-            customDirectoryBrowsing = true
-        }
-        if !inputText.hasSuffix("/"), (try? resolvedCustomDirectory(inputText)) != nil {
-            setInput(.prompt, text: inputText + "/")
-        }
-        prompt?.hint = customDirectoryHint
-        prompt?.error = nil
-        refreshCustomDirectoryChoices()
-    }
-
-    func cancelCustomDirectoryBrowse() {
-        guard customDirectoryBrowsing else { return }
-        setInput(.prompt, text: customDirectoryBrowseOrigin)
-        customDirectoryBrowsing = false
-        prompt?.hint = customDirectoryHint
-        prompt?.error = nil
-        customFeedback = nil
+    func focusCustomDirectoryChoices() {
+        guard isCustomDirectoryEditing, !customSaving, !customDirectoryFocused else { return }
         captureCustomDraft()
+        customDirectoryPath = inputText
+        customDirectoryFocused = true
+        prompt?.acceptsText = false
+        prompt?.hint = customDirectoryHint
+        prompt?.error = nil
         refreshCustomDirectoryChoices()
+    }
+
+    func leaveCustomDirectoryChoices() {
+        guard customDirectoryFocused else { return }
+        customDirectoryFocused = false
+        customDirectoryPath = ""
+        customDirectoryPreselectPath = nil
+        prompt?.acceptsText = true
+        prompt?.hint = customDirectoryHint
+        setInput(.prompt, text: inputText)
+        completionGeneration &+= 1
+        completionTask?.cancel()
+        completionTask = nil
+        customDirectoryLoading = false
+        prompt?.choices = []
+        prompt?.selectedChoice = 0
     }
 
     func moveCustomDirectoryChoice(_ direction: Int) {
-        guard customDirectoryBrowsing, let prompt, !prompt.choices.isEmpty else { return }
-        self.prompt?.selectedChoice = (prompt.selectedChoice + direction + prompt.choices.count) % prompt.choices.count
+        guard customDirectoryFocused, let prompt, !prompt.choices.isEmpty else { return }
+        self.prompt?.selectedChoice = min(max(0, prompt.selectedChoice + direction), prompt.choices.count - 1)
     }
 
     func openCustomDirectoryChoice() {
-        guard customDirectoryBrowsing, let prompt, prompt.choices.indices.contains(prompt.selectedChoice) else { return }
-        setInput(.prompt, text: prompt.choices[prompt.selectedChoice].label)
-        captureCustomDraft()
+        guard customDirectoryFocused, let prompt, prompt.choices.indices.contains(prompt.selectedChoice),
+              prompt.choices[prompt.selectedChoice].detail != "current-directory" else { return }
+        customDirectoryPath = prompt.choices[prompt.selectedChoice].label
         self.prompt?.error = nil
-        customFeedback = nil
         refreshCustomDirectoryChoices()
     }
 
     func ascendCustomDirectory() {
-        guard customDirectoryBrowsing else { return }
-        let expanded = (inputText as NSString).expandingTildeInPath
-        let candidate = expanded.hasPrefix("/") ? expanded : customDirectoryBase.appendingPathComponent(expanded).path
-        let standardized = URL(fileURLWithPath: candidate, isDirectory: true).standardizedFileURL.path
-        let parent = (standardized as NSString).deletingLastPathComponent
-        setInput(.prompt, text: parent == "/" ? "/" : parent + "/")
-        customDirectoryPreselectPath = standardized
-        captureCustomDraft()
+        guard customDirectoryFocused, let current = prompt?.choices.first,
+              current.detail == "current-directory" else { return }
+        let url = URL(fileURLWithPath: current.label, isDirectory: true).standardizedFileURL
+        customDirectoryPath = url.deletingLastPathComponent().path
+        customDirectoryPreselectPath = url.path
         prompt?.error = nil
         refreshCustomDirectoryChoices()
     }
 
-    func exitCustomDirectoryBrowse() {
-        guard customDirectoryBrowsing else { return }
-        do { _ = try resolvedCustomDirectory(inputText) }
-        catch {
-            prompt?.error = error.localizedDescription
+    func acceptCustomDirectoryChoice() {
+        guard customDirectoryFocused, let prompt, prompt.choices.indices.contains(prompt.selectedChoice) else { return }
+        do {
+            let path = try resolvedCustomDirectory(prompt.choices[prompt.selectedChoice].label).path
+            setInput(.prompt, text: path)
+            captureCustomDraft()
+            leaveCustomDirectoryChoices()
+            self.prompt?.error = nil
+            customFeedback = nil
+        } catch {
+            self.prompt?.error = error.localizedDescription
             customFeedback = error.localizedDescription
-            return
         }
-        customDirectoryBrowsing = false
-        prompt?.hint = customDirectoryHint
-        prompt?.error = nil
-        customFeedback = nil
-        captureCustomDraft()
-        refreshCustomDirectoryChoices()
     }
 
-    func chooseCustomDirectoryCandidate(at index: Int) {
-        guard isCustomDirectoryEditing, let prompt, prompt.choices.indices.contains(index) else { return }
-        if !customDirectoryBrowsing {
-            customDirectoryBrowseOrigin = inputText
-            customDirectoryBrowsing = true
-            self.prompt?.hint = customDirectoryHint
-        }
+    func chooseCustomDirectoryCandidate(at index: Int, activate: Bool = false) {
+        guard isCustomDirectoryEditing, customDirectoryFocused, let prompt, prompt.choices.indices.contains(index) else { return }
         self.prompt?.selectedChoice = index
-        openCustomDirectoryChoice()
+        if activate { acceptCustomDirectoryChoice() }
     }
 
 
@@ -198,7 +201,8 @@ extension LauncherModel {
         switch customScreen {
         case .edit: return customDraft
         case .execution: return customExecutionCommand
-        case .list, .delete: return selectedCustomCommand
+        case .delete: return customDeleteTarget
+        case .list: return selectedCustomCommand
         }
     }
     var customExecutionRows: [(String, String)] {
@@ -304,22 +308,18 @@ extension LauncherModel {
         completionTask?.cancel()
         completionTask = nil
         customDirectoryLoading = false
-        customDirectoryBrowsing = false
+        customDirectoryFocused = false
+        customDirectoryPath = ""
         customDirectoryPreselectPath = nil
         let field = customField
         if field == .terminal { refreshCustomTerminals() }
         let hint = field == .directory ? customDirectoryHint
-            : field == .terminal && draft.type == .directory ? "Finder / 已安装终端 · ↑↓ 切字段 · ←→ / 空格改值"
-            : field == .terminal ? "已检测 \(installedCustomTerminals.count) 个终端 · ↑↓ 切字段 · ←→ / 空格改值"
-            : field.isOption ? "↑↓ 切换字段 · ←→ / 空格改值 · ⌘Enter 保存" : "↑↓ 切换字段 · ⌘Enter 保存 · Esc 取消"
+            : field.isOption ? "Tab / ⇧Tab 切字段 · ←→ / 空格改值 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
+            : "Tab / ⇧Tab 切字段 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
         prompt = TerminalPrompt(command: "commands-edit", field: customFieldLabel(field, command: draft),
                                 hint: hint,
                                 acceptsText: !field.isOption)
         setInput(.prompt, text: customValue(field, command: draft))
-        if field == .directory {
-            if !inputText.hasSuffix("/"), (try? resolvedCustomDirectory(inputText)) != nil { setInput(.prompt, text: inputText + "/") }
-            refreshCustomDirectoryChoices()
-        }
     }
     func selectCustomField(_ index: Int) {
         guard customScreen == .edit, !customSaving, customFields.indices.contains(index) else { return }
@@ -334,6 +334,10 @@ extension LauncherModel {
         captureCustomDraft()
         customFieldIndex = next
         showCustomField()
+    }
+    func tabCustomField(backward: Bool) {
+        if customDirectoryFocused { leaveCustomDirectoryChoices() }
+        moveCustomField(backward ? -1 : 1)
     }
     func cycleCustomOption(_ direction: Int) {
         guard var draft = customDraft else { return }
@@ -361,14 +365,37 @@ extension LauncherModel {
         guard customScreen == .edit, !customSaving else { return }
         captureCustomDraft()
         guard var draft = customDraft else { return }
+        var invalidField: CustomCommandField = .directory
         do {
             if draft.type != .url { draft.directory = try resolvedCustomDirectory(draft.directory).path }
+            let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let field = customFields.first(where: { customValue($0, command: draft).contains("\0") }) {
+                invalidField = field
+            } else if name.range(of: "^[a-z][a-z0-9_-]*$", options: .regularExpression) == nil || Self.reservedCommandNames.contains(name) {
+                invalidField = .name
+            } else if draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                invalidField = .title
+            } else if draft.type != .directory && (draft.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || draft.type == .url || draft.type == .program && !draft.target.hasPrefix("/") && !draft.target.hasPrefix("~/")) {
+                invalidField = .target
+            } else {
+                invalidField = .terminal
+            }
             let command = try draft.validated(reservedNames: Self.reservedCommandNames)
+            invalidField = .name
+            guard !customCommands.contains(where: { $0.name == command.name && $0.name != customOriginalName }) else {
+                throw CustomCommandError.invalidData("命令名已存在，请换一个名称。")
+            }
             var next = customCommands
             if let original = customOriginalName, let index = next.firstIndex(where: { $0.name == original }) { next[index] = command }
             else { next.append(command) }
             persistCustomCommands(next, selecting: command.name, message: "已保存 :\(command.name)")
-        } catch { prompt?.error = error.localizedDescription; customFeedback = error.localizedDescription }
+        } catch {
+            if let index = customFields.firstIndex(of: invalidField) { customFieldIndex = index }
+            showCustomField()
+            prompt?.error = error.localizedDescription
+            customFeedback = error.localizedDescription
+        }
     }
     func persistCustomCommands(_ next: [CustomCommand], selecting name: String?, message: String) {
         guard !customSaving, customLoaded, customIssue == nil else { return }
@@ -394,14 +421,15 @@ extension LauncherModel {
         }
     }
     func requestCustomDelete() {
-        guard !customSaving, let command = selectedCustomCommand else { return }
+        guard customScreen == .list, prompt == nil, !customSaving, let command = selectedCustomCommand else { return }
+        customDeleteTarget = command
         customScreen = .delete
         customFeedback = nil
         prompt = TerminalPrompt(command: "commands-delete", field: "删除", hint: "y 确认 · n / Enter / Esc 取消", acceptsText: false)
         setInput(.prompt, text: ":\(command.name) · 只删除配置")
     }
     func confirmCustomDelete() {
-        guard customScreen == .delete, let command = selectedCustomCommand else { return }
+        guard customScreen == .delete, let command = customDeleteTarget else { return }
         persistCustomCommands(customCommands.filter { $0.name != command.name }, selecting: nil, message: "已删除 :\(command.name)，未删除目标文件。")
     }
     func selectCustomCommand(_ index: Int) {
@@ -423,16 +451,68 @@ extension LauncherModel {
     }
     func escapeCustomCommands() {
         guard !customSaving else { return }
+        if customStopConfirmation { cancelCustomStop(); return }
+        if customDirectoryFocused { leaveCustomDirectoryChoices(); return }
         customFeedback = nil
-        if inputKind == .command || inputKind == .search { inputKind = nil; return }
+        if inputKind == .command { inputKind = nil; return }
+        if inputKind == .search || customScreen == .list && !customQuery.isEmpty {
+            inputKind = nil
+            customQuery = ""
+            inputText = ""
+            customIndex = 0
+            bufferOffset = 0
+            clampCustomSelection()
+            return
+        }
         if customScreen != .list {
             finishPrompt()
             customDraft = nil
             customScreen = .list
             bufferOffset = 0
             clampCustomSelection()
-        } else if !customQuery.isEmpty { customQuery = ""; customIndex = 0; clampCustomSelection() }
-        else { buffer = nil; bufferOffset = 0 }
+        } else { buffer = nil; bufferOffset = 0 }
+    }
+    var canStopCustomExecution: Bool {
+        customExecuting && customExecutionCommand?.type == .program && customExecutionCommand?.terminal == CustomCommandTerminal.none
+    }
+    func requestCustomStop() {
+        guard buffer == .commands, [.list, .execution].contains(customScreen), prompt == nil,
+              inputKind == nil, canStopCustomExecution else { return }
+        customStopConfirmation = true
+    }
+    func cancelCustomStop() { customStopConfirmation = false }
+    func confirmCustomStop() {
+        guard customStopConfirmation else { return }
+        customStopConfirmation = false
+        guard canStopCustomExecution else { return }
+        customExecutor.cancelRunningProgram()
+        customExecutionSummary = "已请求停止后台程序；等待实际退出状态…"
+    }
+    func showCustomExecution() {
+        guard customExecutionCommand != nil, prompt == nil, !customStopConfirmation else { return }
+        inputKind = nil
+        customScreen = .execution
+        bufferOffset = 0
+    }
+    var customKeyboardHint: String {
+        if customStopConfirmation { return "停止当前后台任务？y 确认 · n / Enter / Esc 取消" }
+        if inputKind == .command { return "↑↓ 选择命令 · Tab / ⇧Tab 补全 · ⌥↑↓ 历史 · Enter 执行 · Esc 返回" }
+        switch customScreen {
+        case .edit:
+            return isCustomDirectoryEditing ? customDirectoryHint
+                : customField.isOption ? "Tab / ⇧Tab 切字段 · ←→ / 空格改值 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
+                : "Tab / ⇧Tab 切字段 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
+        case .delete: return "y 确认删除 · n / Enter / Esc 取消（只删除命令配置）"
+        case .execution: return "↑↓ 滚动 · Page Up/Down 翻屏 · e 编辑 · Esc 返回列表" + (canStopCustomExecution ? " · ⌘. 停止任务" : "")
+        case .list:
+            if inputKind == .search {
+                return selectedCustomCommand == nil ? "输入筛选命令 · Esc 清空搜索"
+                    : "↑↓ 选择并保留输入 · Tab 进入列表 · Enter 运行 · Esc 清空搜索"
+            }
+            let actions = selectedCustomCommand == nil ? "/ / ⇧Tab 搜索 · a / ⌘N 新建"
+                : "↑↓ 选择 · ⇧Tab 搜索 · Enter 运行 · a / ⌘N 新建 · e 编辑 · ⌘C 复制调用 · ⌘D 创建副本 · ⇧D 删除"
+            return actions + (canStopCustomExecution ? " · ⌘. 停止任务" : "")
+        }
     }
     func executeCustomCommand(_ command: CustomCommand, input: String = "") {
         guard !customExecuting, !customSaving, customLoaded else {
@@ -453,7 +533,7 @@ extension LauncherModel {
         customFeedback = nil
         customExecuting = true
         Task { [self] in
-            defer { customExecuting = false }
+            defer { customExecuting = false; customStopConfirmation = false }
             do {
                 let result = try await customExecutor.execute(command, input: input)
                 customExecutionSummary = result.summary
@@ -472,59 +552,85 @@ extension LauncherModel {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         let text = event.charactersIgnoringModifiers ?? ""
         if customSaving { return true }
-        if event.keyCode == 53 {
-            if customScreen == .execution, customExecuting {
-                customExecutor.cancelRunningProgram()
-                customExecutionSummary = "已请求终止后台程序；等待退出状态…"
-                return true
+        if customStopConfirmation {
+            if modifiers == .command, ["q", "h"].contains(text.lowercased()) { return false }
+            if modifiers.isEmpty {
+                if text == "y" { confirmCustomStop() }
+                else if text == "n" || [36, 76, 53].contains(event.keyCode) { cancelCustomStop() }
             }
-            if customScreen == .edit, customDirectoryBrowsing { cancelCustomDirectoryBrowse(); return true }
-            escapeCustomCommands(); return true
+            return true
         }
+        if modifiers.isEmpty, event.keyCode == 53 { escapeCustomCommands(); return true }
+        if modifiers == .command, text == ".", inputKind == nil,
+           [.list, .execution].contains(customScreen), canStopCustomExecution { requestCustomStop(); return true }
         if customScreen == .edit {
             if modifiers == .command, [36, 76].contains(event.keyCode) { saveCustomDraft(); return true }
-            if modifiers.contains(.command) || modifiers.contains(.control) || modifiers.contains(.option) { return false }
-            let browsing = isCustomDirectoryEditing && customDirectoryBrowsing
-            if [125, 126].contains(event.keyCode) {
-                if browsing { moveCustomDirectoryChoice(event.keyCode == 125 ? 1 : -1) }
-                else { moveCustomField(event.keyCode == 125 ? 1 : -1) }
-                return true
+            if modifiers == .command, event.keyCode == 125, isCustomDirectoryEditing {
+                focusCustomDirectoryChoices(); return true
             }
-            if event.keyCode == 48 {
-                if browsing {
-                    if modifiers.contains(.shift) { ascendCustomDirectory() } else { openCustomDirectoryChoice() }
-                }
-                else { moveCustomField(modifiers.contains(.shift) ? -1 : 1) }
-                return true
+            if event.keyCode == 48, modifiers.isEmpty || modifiers == .shift {
+                tabCustomField(backward: modifiers == .shift); return true
             }
+            guard modifiers.isEmpty else { return false }
             if [36, 76].contains(event.keyCode) {
-                if browsing { exitCustomDirectoryBrowse() }
-                else if isCustomDirectoryEditing { beginCustomDirectoryBrowse() }
-                else if customFieldIndex == customFields.count - 1 { saveCustomDraft() }
-                else { moveCustomField(1) }
+                if customDirectoryFocused { acceptCustomDirectoryChoice() } else { saveCustomDraft() }
+                return true
+            }
+            if customDirectoryFocused {
+                switch event.keyCode {
+                case 125: moveCustomDirectoryChoice(1)
+                case 126: moveCustomDirectoryChoice(-1)
+                case 121: moveCustomDirectoryChoice(10)
+                case 116: moveCustomDirectoryChoice(-10)
+                case 124: openCustomDirectoryChoice()
+                case 123: ascendCustomDirectory()
+                default: break
+                }
                 return true
             }
             if customField.isOption {
                 if text == " " || [123, 124].contains(event.keyCode) { cycleCustomOption(event.keyCode == 123 ? -1 : 1) }
                 return true
             }
-            // 字符输入由字段编辑器经 updateInput 处理，并会先退出浏览。
             return false
         }
-        if modifiers.contains(.command) || modifiers.contains(.control) || modifiers.contains(.option) { return false }
         if customScreen == .delete {
-            if text.lowercased() == "y", modifiers.isEmpty || modifiers == .shift { confirmCustomDelete() }
-            else if text.lowercased() == "n" || [36, 76].contains(event.keyCode) { escapeCustomCommands() }
+            guard modifiers.isEmpty else { return false }
+            if text == "y" { confirmCustomDelete() }
+            else if text == "n" || [36, 76].contains(event.keyCode) { escapeCustomCommands() }
             return true
         }
         if inputKind == .search {
-            if [36, 76].contains(event.keyCode) { inputKind = nil; return true }
-            return false
+            guard modifiers.isEmpty else { return false }
+            switch event.keyCode {
+            case 125: customIndex += 1; clampCustomSelection()
+            case 126: customIndex -= 1; clampCustomSelection()
+            case 121: customIndex += Self.calcVisibleRows; clampCustomSelection()
+            case 116: customIndex -= Self.calcVisibleRows; clampCustomSelection()
+            case 48: if selectedCustomCommand != nil { inputKind = nil }
+            case 36, 76: if let command = selectedCustomCommand { executeCustomCommand(command) }
+            default: return false
+            }
+            return true
         }
-        if text == ":" { startCommand(); return true }
+        if customScreen == .list, inputKind == nil {
+            if modifiers == .command, text.lowercased() == "d" {
+                duplicateCurrentCommand()
+                return true
+            }
+            if modifiers == .command, text.lowercased() == "n" { addCurrentObject(); return true }
+            if modifiers == .shift, event.keyCode == 48 { startCustomSearch(); return true }
+            if modifiers == .shift, text == "D" { requestCustomDelete(); return true }
+            if modifiers == .shift, text == "G" { customIndex = max(0, filteredCustomCommands.count - 1); clampCustomSelection(); return true }
+        }
+        if text == ":", modifiers.isEmpty || modifiers == .shift { startCommand(); return true }
+        guard modifiers.isEmpty, !isTextEditing else { return false }
         if customScreen == .execution {
             if text == "e", let command = customExecutionCommand { beginCustomEdit(command) }
-            else if [125, 126, 121, 116].contains(event.keyCode) { scroll(rows: [125, 121].contains(event.keyCode) ? 1 : -1) }
+            else if [125, 126, 121, 116].contains(event.keyCode) {
+                let step = [121, 116].contains(event.keyCode) ? Self.calcVisibleRows : 1
+                scroll(rows: [125, 121].contains(event.keyCode) ? step : -step)
+            } else { return false }
             return true
         }
         switch event.keyCode {
@@ -538,13 +644,10 @@ extension LauncherModel {
         switch text {
         case "j": customIndex += 1; clampCustomSelection()
         case "k": customIndex -= 1; clampCustomSelection()
-        case "a": beginCustomEdit()
+        case "a": addCurrentObject()
         case "e": if let command = selectedCustomCommand { beginCustomEdit(command) }
-        case "c": if let command = selectedCustomCommand { beginCustomEdit(command, copy: true) }
-        case "D": requestCustomDelete()
         case "/": startCustomSearch()
         case "g": customIndex = 0; clampCustomSelection()
-        case "G": customIndex = max(0, filteredCustomCommands.count - 1); clampCustomSelection()
         default: return false
         }
         return true

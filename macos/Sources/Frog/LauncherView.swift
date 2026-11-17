@@ -96,30 +96,30 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         return 58
     }
 
-    private var commandHint: String {
-        if let prompt = model.prompt { return prompt.error ?? prompt.hint }
+    private var inputAccessibilityHelp: String {
+        if model.buffer == .commands, model.isCommandsEditing, model.inputKind != .command { return model.customKeyboardHint }
+        if let prompt = model.prompt { return prompt.error ?? prompt.keyboardHint }
+        if model.buffer == .calc, model.calcHistoryFocused, model.inputKind != .command {
+            return model.calcFeedback ?? "Enter 载入 · ⌘C 复制 · Esc 返回草稿"
+        }
         switch model.inputKind {
         case .search:
-            if model.buffer == .commands { return "Enter 确认筛选 · Esc 结束输入" }
-            if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return "↑↓ / Tab 操作结果 · Enter 结束搜索 · Esc 退出"
-            }
-            if model.items.isEmpty { return "Enter 打开网址 / 网页搜索 · Esc 清空" }
-            return "↑↓ / Tab 操作结果 · Enter 打开 · Esc 清空"
+            if model.buffer == .commands { return "↑↓ 选择 · Tab 操作结果 · Enter 运行 · Esc 清空" }
+            let navigation = model.items.isEmpty ? "" : "↑↓ 选择 · Tab 操作结果 · "
+            return navigation + "Enter \(model.searchAction.title) · Esc 清空"
         case .command: return "Tab 补全 · ↑↓ 选择 · ⌥↑↓ 历史 · Esc 取消"
-        case .calc: return model.calcFeedback ?? "Enter 计算 · ↑↓ 历史 · c 复制 · Esc 关闭"
+        case .calc: return model.calcFeedback ?? "Enter 计算 · Tab 历史 · ⌘C 复制结果 · Esc 关闭"
         default: return ""
         }
     }
 
-    private var hintWidth: CGFloat { min(510, TerminalDrawing.width(commandHint, size: 12)) }
 
     private func layoutInput() {
         let origin = canvasOrigin
         // NSTextField 的单行文本不按控件中心垂直居中（实测比中心高约 4pt），
         // 下移 4pt 让输入文字与命令行里的提示符、占位符共用一条视觉基线。
         input.frame = NSRect(x: origin.x + inputX * scale, y: origin.y + 763 * scale,
-                             width: max(160, 1400 - hintWidth - 24 - inputX) * scale, height: 28 * scale)
+                             width: max(160, 1400 - inputX) * scale, height: 28 * scale)
         input.font = TerminalDrawing.font(15.5 * scale)
     }
 
@@ -135,7 +135,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             input.stringValue = model.inputText
         }
         input.isHidden = !model.isTextInputActive
-        input.setAccessibilityHelp(model.prompt?.hint ?? commandHint)
+        input.setAccessibilityHelp(inputAccessibilityHelp)
         layoutInput()
         if model.visible, window?.isKeyWindow == true {
             if model.isTextInputActive {
@@ -214,7 +214,7 @@ final class LauncherView: NSView, NSTextFieldDelegate {
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard !textView.hasMarkedText(), let event = NSApp.currentEvent, event.type == .keyDown else { return false }
-        return model.handleKey(event, isTextEditing: true)
+        return LauncherKeyRouter.handle(event, model: model, firstResponder: textView)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -268,12 +268,17 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             model.updateInput(command + " ")
             synchronize()
         case let .command(command): model.runCommand(command)
-        case let .calcRow(index): model.selectCalcEntry(at: index)
+        case let .calcRow(index):
+            model.selectCalcEntry(at: index)
+            if activate { model.loadCalcHistorySelection() }
         case let .custom(action): performCustomAction(action, activate: activate)
         case .input:
             if model.isTextInputActive {
                 focusInput(selection: (input.currentEditor() as? NSTextView)?.selectedRange() ?? savedSelection)
             }
+            else if model.buffer == .calc, model.prompt == nil { model.focusCalcInput() }
+            else if model.customDirectoryFocused { model.leaveCustomDirectoryChoices() }
+            else if model.prompt?.choicesFocused == true { model.prompt?.choicesFocused = false }
             else if model.prompt == nil { model.startCommand() }
         }
         synchronize()
@@ -395,11 +400,9 @@ final class LauncherView: NSView, NSTextFieldDelegate {
             if !model.query.isEmpty {
                 D.icon("search", x: 706, y: 324, size: 28, color: D.muted)
                 D.text("没有匹配的书签", 720, 388, size: 16, color: D.ink2, bold: true, align: .center)
-                D.text("Enter 打开网址或用默认浏览器搜索“\(model.query)”", 720, 420, size: 12, color: D.muted, maxWidth: 1000, align: .center)
             } else {
                 D.text("∅", 720, 352, size: 38, color: D.muted.withAlphaComponent(0.42), align: .center)
                 D.text("还没有书签", 720, 402, size: 15, color: D.ink2, bold: true, align: .center)
-                D.text("按 a 添加书签 · :restore 从备份恢复", 720, 428, size: 12, color: D.muted, align: .center)
             }
         }
         if model.items.count > model.visibleRowCount {
@@ -471,19 +474,26 @@ final class LauncherView: NSView, NSTextFieldDelegate {
 
     private func drawOutput() {
         typealias D = TerminalDrawing
-        D.rect(NSRect(x: 40, y: 664, width: 1360, height: 72), D.paper)
-        D.rule(40, 664, 1360)
         if let prompt = model.prompt {
-            D.rect(NSRect(x: 40, y: 665, width: 1360, height: 71), D.surface)
-            D.rect(NSRect(x: 40, y: 664, width: 3, height: 72), D.yellow)
-            D.text("PROMPT · \(prompt.command.uppercased())", 54, 678, size: 10.5, color: D.muted)
-            D.text(prompt.total > 0 ? "步骤 \(prompt.step + 1)/\(prompt.total) · Shift+Tab 返回 · Esc 取消" : "Esc 取消", 1390, 678, size: 10.5, color: D.muted, align: .right)
+            let context: String?
+            switch prompt.command {
+            case "delete": context = "删除“\(model.draft.title ?? "")”？"
+            case "restore": context = "将替换当前全部书签与文件夹，不合并。"
+            default: context = prompt.context
+            }
+            guard !prompt.choices.isEmpty || prompt.error != nil || context != nil else { return }
+            D.rect(NSRect(x: 40, y: 664, width: 1360, height: 72), D.surface)
+            D.rule(40, 664, 1360)
             if !prompt.choices.isEmpty {
+                if let message = prompt.error ?? context {
+                    D.text(message, 54, 678, size: 12, color: prompt.error == nil ? D.muted : D.red, maxWidth: 1320)
+                    hit(NSRect(x: 54, y: 668, width: 1320, height: 20), message)
+                }
                 let start = max(0, prompt.selectedChoice - 2)
                 for index in start..<min(start + 3, prompt.choices.count) {
                     let choice = prompt.choices[index]
                     let y = 698 + CGFloat(index - start) * 14
-                    let selected = index == prompt.selectedChoice
+                    let selected = prompt.choicesFocused && index == prompt.selectedChoice
                     if selected { D.rect(NSRect(x: 40, y: y - 8, width: 1360, height: 16), D.ink) }
                     D.text(String(format: "%02d", index + 1), 50, y, size: 11.5, color: selected ? D.yellow : D.muted)
                     D.text(choice.label, 78, y, size: 12.5, color: selected ? D.paper : D.ink, maxWidth: 800)
@@ -491,31 +501,36 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                     hit(NSRect(x: 40, y: y - 7, width: 1360, height: 14), choice.label + " " + choice.detail, .choice(index), selected: selected)
                 }
             } else {
-                D.text(prompt.error ?? prompt.hint, 54, 700, size: 12.5, color: prompt.error == nil ? D.ink2 : D.red, maxWidth: 1320)
-                let context = prompt.context ?? "Enter 确认 · Esc 取消；未提交的输入会保留。"
-                D.text(context, 54, 718, size: 11.5, color: D.muted, maxWidth: 1320)
-                hit(NSRect(x: 54, y: 708, width: 1320, height: 24), context)
+                if let error = prompt.error {
+                    D.text(error, 54, context == nil ? 700 : 686, size: 12.5, color: D.red, maxWidth: 1320)
+                    hit(NSRect(x: 54, y: context == nil ? 688 : 674, width: 1320, height: 24), error)
+                }
+                if let context {
+                    D.text(context, 54, prompt.error == nil ? 700 : 714, size: 12, color: D.muted, maxWidth: 1320)
+                    hit(NSRect(x: 54, y: prompt.error == nil ? 688 : 702, width: 1320, height: 24), context)
+                }
             }
             return
         }
+        D.rect(NSRect(x: 40, y: 664, width: 1360, height: 72), D.paper)
+        D.rule(40, 664, 1360)
         if let issue = model.store.issue, model.inputKind == nil {
             D.text("DATA ERROR · 已保留现有数据", 40, 679, size: 10.5, color: D.red)
             D.text(issue, 40, 700, size: 12.5, color: D.red, maxWidth: 1360)
-            D.text(":retry 重试载入 · :cd 更换数据目录 · :log 查看日志", 40, 720, size: 11.5, color: D.muted)
             hit(NSRect(x: 40, y: 688, width: 1360, height: 24), issue)
             return
         }
         if model.isOrganizing {
-            D.text("整理 / ORGANIZE", 40, 678, size: 11, color: D.green, bold: true)
-            D.text("j/k 选择 · Shift+↑/↓ 或 J/K 调整顺序 · m 移到文件夹 · D 删除确认", 40, 699, size: 13, color: D.ink2)
-            D.text("文件夹置顶且固定；拖动书签排序、移入文件夹，或在根书签中央停留创建文件夹。o / Esc 完成。", 40, 718, size: 12, color: D.muted)
+            D.text("整理", 40, 678, size: 11, color: D.green, bold: true)
+            D.text("文件夹置顶且固定；书签仅在同组内排序。", 40, 699, size: 13, color: D.ink2)
+            D.text("可拖动书签排序、移入文件夹，或在根书签中央停留创建文件夹。", 40, 718, size: 12, color: D.muted)
             return
         }
         D.text("OUTPUT", 40, 679, size: 10.5, color: D.muted)
-        D.text(":log 查看全部", 1400, 679, size: 10.5, color: D.muted, align: .right)
+        D.text("查看日志", 1400, 679, size: 10.5, color: D.muted, align: .right)
         hit(NSRect(x: 1280, y: 666, width: 120, height: 22), "查看全部日志", .command("log"))
         if model.logs.isEmpty {
-            D.text("就绪。输入 : 打开命令，/ 搜索，a 添加，? 帮助。", 40, 704, size: 12, color: D.muted)
+            D.text("就绪。", 40, 704, size: 12, color: D.muted)
         } else {
             for (index, entry) in model.logs.suffix(3).enumerated() {
                 let y = 698 + CGFloat(index) * 16
@@ -553,25 +568,21 @@ final class LauncherView: NSView, NSTextFieldDelegate {
         if let prompt = model.prompt { D.text(prompt.label, 58, 773, size: 13, color: D.muted, maxWidth: inputX - 70) }
         else if isCalc { D.text(Self.calcLabel, 58, 773, size: 13, color: D.muted, maxWidth: inputX - 70) }
         if !model.isTextInputActive {
-            if model.prompt != nil { D.text(model.inputText, inputX, 773, size: 15.5, maxWidth: 1400 - inputX - hintWidth - 24) }
+            if model.prompt != nil { D.text(model.inputText, inputX, 773, size: 15.5, maxWidth: 1400 - inputX) }
             else {
-                let placeholder = model.buffer == .settings ? ": 输入命令 · :help 查看帮助"
-                    : model.buffer == .commands ? ": 输入命令 · Esc 返回" : ": 打开命令 · / 搜索 · ? 帮助"
-                D.text(placeholder, inputX + 2, 773, color: D.muted)
+                let placeholder: String
+                if model.customStopConfirmation { placeholder = "停止确认 · 默认取消" }
+                else if model.buffer == .calc, model.calcHistoryFocused { placeholder = "算式草稿：" + model.calcExpression }
+                else { placeholder = "输入命令" }
+                D.text(placeholder, inputX + 2, 773, color: D.muted, maxWidth: 1400 - inputX)
             }
         }
-        if !commandHint.isEmpty {
-            let hintColor: NSColor = model.prompt?.error != nil ? D.red
-                : isCalc && model.calcFeedback != nil ? D.level(model.calcFeedbackLevel) : D.muted
-            D.text(commandHint, 1400, 773, size: 12, color: hintColor, maxWidth: hintWidth, align: .right)
-            hit(NSRect(x: 1400 - hintWidth, y: 752, width: hintWidth, height: 44), commandHint, .input)
-        }
-        hit(NSRect(x: 40, y: 752, width: 1360 - hintWidth - 24, height: 44), "命令行输入", .input)
+        hit(NSRect(x: 40, y: 752, width: 1360, height: 44), "命令行输入", .input)
         D.rect(NSRect(x: 0, y: 796, width: 1440, height: 36), D.forest)
         let modeLabel = model.modeLabel
         let statusLabel = page.map { $0.name + " · " + modeLabel } ?? modeLabel
         D.text(statusLabel, 40, 815.5, size: 12.5, color: D.yellow, bold: true, maxWidth: 800)
-        if model.buffer == nil {
+        if model.buffer == nil, model.prompt == nil {
             let status: String?
             if !model.query.isEmpty {
                 status = "“\(model.query)” · \(model.items.count) 条结果"
@@ -586,154 +597,123 @@ final class LauncherView: NSView, NSTextFieldDelegate {
                        color: D.paper.withAlphaComponent(0.82), maxWidth: max(0, 740 - x))
             }
         }
-        if model.prompt == nil, model.inputKind == nil, !model.busy {
-            D.text(model.buffer == .settings ? ":set <key> <value> · :help 帮助 · Esc 返回" : model.buffer == .commands ? ": 命令 · Esc 返回" : ": 命令 · ? 帮助",
-                   1400, 815.5, size: 12, color: D.mint, maxWidth: 640, align: .right)
-        }
         drawShortcutHints()
+    }
+
+    func drawShortcutKey(_ key: String, _ label: String, x: inout CGFloat, action: Action? = nil) {
+        typealias D = TerminalDrawing
+        let width = D.key(key, x: x, y: 856)
+        let labelWidth = D.width(label, size: 11.5)
+        D.text(label, x + width + 6, 856.5, size: 11.5, color: D.muted)
+        hit(NSRect(x: x, y: 845, width: width + 6 + labelWidth, height: 22), "\(key) \(label)", action)
+        x += width + 24 + labelWidth
     }
 
     private func drawShortcutHints() {
         typealias D = TerminalDrawing
-        if model.buffer == .commands { return }
         var x: CGFloat = 40
         func key(_ key: String, _ label: String) {
-            let width = D.key(key, x: x, y: 856)
-            let labelWidth = D.width(label, size: 11.5)
-            D.text(label, x + width + 6, 856.5, size: 11.5, color: D.muted)
-            hit(NSRect(x: x, y: 845, width: width + 6 + labelWidth, height: 22), "\(key) \(label)")
-            x += width + 24 + labelWidth
+            drawShortcutKey(key, label, x: &x)
         }
 
-        // 与按键路由保持相同优先级，提示流不能泄漏底层列表或缓冲区的快捷键。
         if model.busy {
-            D.text("正在处理，请稍候…", 40, 856.5, size: 11.5, color: D.muted)
+            D.text("正在处理…", 40, 856.5, size: 11.5, color: D.muted)
+            return
+        }
+        if model.buffer == .commands, model.isCommandsEditing, model.inputKind != .command {
+            drawCustomShortcutHints()
             return
         }
         if let prompt = model.prompt {
-            switch prompt.command {
-            case "hotkey":
-                key("组合键", "录入新快捷键")
-                key("Esc", "取消录入")
-                return
-            case "delete":
-                key("y", "确认删除")
-                key("N / Enter / Esc", "取消删除")
-                return
-            case "edit":
-                key("Tab / ⇧Tab", "切换标题 / 网址")
-                key("Enter", "保存全部")
-            default:
-                if !prompt.choices.isEmpty {
-                    key("Tab / ↑↓", prompt.field == "path" || prompt.field == "file" ? "补全路径" : "选择位置")
-                }
-                if (prompt.command == "add" || prompt.command == "move") && prompt.step > 0 {
-                    key("⇧Tab", "返回上一步")
-                }
-                let submit: String
+            if prompt.command == "hotkey" {
+                key("组合键", "录入")
+                key("Esc", "取消")
+            } else if prompt.command == "delete" {
+                key("y", "删除")
+                key("Esc", "取消")
+            } else if prompt.choicesFocused {
+                key("↑↓", "选择")
+                key("Enter", "采纳")
+                key("Tab/⇧Tab", "切字段")
+                key("Esc", "返回字段")
+            } else {
+                if !prompt.choices.isEmpty { key("Tab", "候选") }
+                else if prompt.total > 1 { key("Tab/⇧Tab", "切字段") }
+                let action: String
                 switch prompt.command {
-                case "add":
-                    submit = prompt.step < 2 ? "下一步"
-                        : prompt.step == 2 ? "确认位置" : "创建并添加"
-                case "move": submit = prompt.step == 0 ? "确认目标" : "创建并移动"
-                case "rename": submit = "保存名称"
-                case "mkdir": submit = "创建文件夹"
-                case "backup": submit = "导出备份"
-                case "restore": submit = "恢复并替换全部数据"
-                case "cd": submit = "切换目录"
-                default: submit = "提交"
+                case "backup": action = "导出"
+                case "restore": action = "恢复并替换"
+                case "cd": action = "切换目录"
+                case "move": action = "移动"
+                case "mkdir": action = "创建"
+                default: action = "保存"
                 }
-                key("Enter", submit)
+                key("Enter", action)
+                key("Esc", ["add", "edit", "rename", "mkdir", "move"].contains(prompt.command) ? "放弃修改" : "取消")
             }
-            key("Esc", "取消")
             return
         }
         if model.inputKind == .command {
-            key("Tab / ⇧Tab", "补全命令")
-            key("↑↓", "选择候选")
-            key("⌥↑↓", "命令历史")
-            key("Enter", "执行命令")
-            key("Esc", model.buffer == .calc ? "返回算式" : "取消命令")
+            if !model.commandCandidates.isEmpty { key("↑↓", "候选"); key("Tab", "补全") }
+            key("Enter", "执行")
+            key("Esc", "取消")
             return
         }
         if model.inputKind == .search {
-            if !model.items.isEmpty { key("↑↓ / Tab", "进入结果操作") }
-            key("Enter", model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "结束搜索"
-                : model.items.isEmpty ? "打开网址 / 网页搜索" : "打开结果")
-            key("Esc", "清空并退出搜索")
+            if !model.items.isEmpty { key("↑↓", "选择"); key("Tab", "进列表") }
+            key("Enter", model.searchAction.title)
+            key("Esc", "清空")
             return
         }
         if let buffer = model.buffer {
             switch buffer {
             case .calc:
-                if model.isCalcActive {
-                    key("Enter / =", "计算")
-                    if !model.calcHistory.isEmpty { key("↑↓", "选择历史") }
-                    key("c", "复制结果")
+                if model.calcHistoryFocused {
+                    key("↑↓", "选择")
+                    key("Enter", "载入")
+                    key("⌘C", "复制结果")
+                    key("Esc", "返回草稿")
+                } else {
+                    key("Enter", "计算")
+                    if !model.calcHistory.isEmpty { key("Tab", "历史") }
+                    key("⌘C", "复制")
+                    key("Esc", "返回")
                 }
-                key(":", "命令")
-                key("Esc", model.isCalcActive ? "关闭并保留算式" : "返回算式")
             case .settings:
-                key(":", "输入设置命令")
-                key(":help", "帮助")
-                key("Esc", "返回书签")
+                key(":", "命令")
+                key("Esc", "返回")
             case .commands: break
             case .help, .log, .job:
-                key("j/k / ↑↓", "滚动")
-                key("PgUp / PgDn", "翻屏")
-                key("g / G", "首行 / 末行")
+                key("↑↓", "滚动")
                 key(":", "命令")
-                if buffer == .log { key(":clear", "清空日志") }
-                key("/", "搜索书签")
-                key("Esc", "返回书签")
+                key("Esc", "返回")
             }
             return
         }
-
+        if model.store.issue != nil {
+            // 载入失败时内容区已有可点击恢复入口，不再复述。
+            if model.store.isLoaded { key(":retry", "重试"); key(":cd", "更换目录") }
+            key("Esc", "收起")
+            return
+        }
         let selected = model.items.indices.contains(model.selectedIndex) ? model.items[model.selectedIndex] : nil
         let searching = !model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if let selected {
-            key("j/k / ↑↓", "选择")
-            if selected.kind == .folder {
-                key("Enter / Tab", selected.expanded ? "折叠" : "展开")
-                key("r", "重命名")
-            } else {
-                key("Enter", "打开")
-                if model.isOrganizing, model.query.isEmpty { key("⇧↑↓ / K/J", "调整顺序") }
-                else if !model.isOrganizing { key("e", "编辑") }
-                key("m", "移动")
-                key("c", "复制链接")
-            }
-            if selected.kind == .bookmark || !model.document.bookmarks.contains(where: { $0.groupId == selected.id }) {
-                key("D", "删除")
-            }
+            key("↑↓", "选择")
+            if selected.kind == .folder { key("Enter", selected.expanded ? "折叠" : "展开") }
+            else if model.isOrganizing { key("⇧↑↓", "排序"); key("m", "移动") }
+            else { key("Enter", "打开") }
+            if !model.isOrganizing { key("e", selected.kind == .folder ? "重命名" : "编辑") }
         } else if searching {
-            key("Enter", "打开网址 / 网页搜索")
-        }
-        if searching {
-            key("/", "继续搜索")
-            key("Esc", "清空搜索")
-            return
-        }
-        if !model.document.groups.isEmpty {
-            let allExpanded = model.document.groups.allSatisfy { model.expandedGroupIDs.contains($0.id) }
-            key("z", allExpanded ? "全部折叠" : "全部展开")
-        }
-        if !model.isOrganizing {
-            key("a", "添加")
-            key("n", "新建文件夹")
-            key("o", "排序整理")
-        }
-        key("/", "搜索")
-        key(":", "命令")
-        key("?", "帮助")
-        if model.isOrganizing { key("o / Esc", "完成整理") }
-        else if !model.query.isEmpty { key("Esc", "清空搜索") }
-        else if let groupID = model.selectedGroupID(), model.expandedGroupIDs.contains(groupID) {
-            key("Esc", "折叠当前文件夹")
+            key("Enter", model.searchAction.title)
         } else {
-            key("Esc", model.expandedGroupIDs.isEmpty ? "收起窗口" : "折叠全部文件夹")
+            key("a", "添加书签")
+            key("n", "新建文件夹")
         }
+        if model.isOrganizing { key("Esc", "完成"); return }
+        key("/", searching ? "继续搜索" : "搜索")
+        if !searching { key(":", "命令") }
+        key("Esc", searching ? "清空" : "收起")
     }
 
     private func refreshAccessibilityAndTooltips() {

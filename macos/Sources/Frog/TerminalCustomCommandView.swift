@@ -2,7 +2,8 @@ import AppKit
 import FrogCore
 
 enum CustomCommandAction {
-    case add, edit, copy, delete, confirmDelete, save, cancel, run, search, directoryChoice(Int), field(Int), row(Int)
+    case add, edit, copy, duplicate, delete, confirmDelete, save, cancel, run, search, results, stop, confirmStop, cancelStop
+    case focusList, browseDirectory, acceptDirectory, leaveDirectory, directoryChoice(Int), field(Int), row(Int)
 }
 
 @MainActor
@@ -10,24 +11,102 @@ extension LauncherView {
 
     func performCustomAction(_ action: CustomCommandAction, activate: Bool) {
         guard !model.customSaving else { return }
+        if model.customStopConfirmation {
+            switch action {
+            case .confirmStop: model.confirmCustomStop()
+            case .cancelStop, .cancel: model.cancelCustomStop()
+            default: break
+            }
+            return
+        }
         if model.customScreen == .edit {
-            switch action { case .save, .cancel, .directoryChoice, .field: break; default: return }
+            switch action { case .save, .cancel, .directoryChoice, .field, .browseDirectory, .acceptDirectory, .leaveDirectory: break; default: return }
         }
         switch action {
-        case .add: model.beginCustomEdit()
+        case .add: model.addCurrentObject()
         case .edit: if let command = model.customDisplayedCommand { model.beginCustomEdit(command) }
-        case .copy: if let command = model.selectedCustomCommand { model.beginCustomEdit(command, copy: true) }
+        case .copy: model.copyCurrentObject()
+        case .duplicate: model.duplicateCurrentCommand()
         case .delete: model.requestCustomDelete()
         case .confirmDelete: model.confirmCustomDelete()
         case .save: model.saveCustomDraft()
         case .cancel: model.escapeCustomCommands()
         case .run: if let command = model.selectedCustomCommand { model.executeCustomCommand(command) }
         case .search: model.startCustomSearch()
-        case let .directoryChoice(index): model.chooseCustomDirectoryCandidate(at: index)
+        case .results: model.showCustomExecution()
+        case .stop: model.requestCustomStop()
+        case .confirmStop: model.confirmCustomStop()
+        case .cancelStop: model.cancelCustomStop()
+        case .focusList: model.selectCustomCommand(model.customIndex)
+        case .browseDirectory: model.focusCustomDirectoryChoices()
+        case .acceptDirectory: model.acceptCustomDirectoryChoice()
+        case .leaveDirectory: model.leaveCustomDirectoryChoices()
+        case let .directoryChoice(index): model.chooseCustomDirectoryCandidate(at: index, activate: activate)
         case let .field(index): model.selectCustomField(index)
         case let .row(index):
             model.selectCustomCommand(index)
-            if activate, let command = model.selectedCustomCommand { model.beginCustomEdit(command) }
+            if activate, let command = model.selectedCustomCommand { model.executeCustomCommand(command) }
+        }
+    }
+
+    func drawCustomShortcutHints() {
+        if model.customSaving {
+            TerminalDrawing.text("正在保存…", 40, 856.5, size: 11.5, color: TerminalDrawing.muted)
+            return
+        }
+        var x: CGFloat = 40
+        func key(_ shortcut: String, _ label: String, _ action: CustomCommandAction? = nil) {
+            drawShortcutKey(shortcut, label, x: &x, action: action.map { .custom($0) })
+        }
+        if model.customStopConfirmation {
+            key("y", "停止", .confirmStop)
+            key("Esc", "取消", .cancelStop)
+            return
+        }
+        switch model.customScreen {
+        case .list:
+            if model.inputKind == .search {
+                if model.selectedCustomCommand != nil {
+                    key("↑↓", "选择")
+                    key("Tab", "进列表", .focusList)
+                    key("Enter", "运行", .run)
+                }
+                key("Esc", "清空", .cancel)
+            } else {
+                key("/", "搜索", .search)
+                key("a", "新建", .add)
+                if model.selectedCustomCommand != nil {
+                    key("e", "编辑", .edit)
+                    key("⌘C", "复制", .copy)
+                    key("⌘D", "副本", .duplicate)
+                    key("⇧D", "删除", .delete)
+                    key("Enter", "运行", .run)
+                }
+            }
+        case .edit:
+            if model.customDirectoryFocused {
+                key("↑↓", "选择")
+                key("←→", "浏览")
+                key("Enter", "采纳", .acceptDirectory)
+                key("⌘Enter", "保存草稿", .save)
+                key("Esc", "取消浏览", .leaveDirectory)
+            } else {
+                key("Tab/⇧Tab", "切字段")
+                if model.customField.isOption { key("←→", "改值") }
+                if model.isCustomDirectoryEditing { key("⌘↓", "浏览目录", .browseDirectory) }
+                key("Enter", "保存", .save)
+                key("Esc", "放弃修改", .cancel)
+            }
+        case .execution:
+            key("↑↓", "滚动")
+            key("e", "编辑", .edit)
+            key("Esc", "返回", .cancel)
+        case .delete:
+            key("y", "删除", .confirmDelete)
+            key("Esc", "取消", .cancel)
+        }
+        if [.list, .execution].contains(model.customScreen), model.canStopCustomExecution, model.inputKind == nil {
+            key("⌘.", "停止任务", .stop)
         }
     }
 
@@ -44,7 +123,7 @@ extension LauncherView {
         } else {
             let message = model.customIssue != nil ? "自定义命令配置读取失败；现有文件已保留。"
                 : !model.customLoaded ? "正在载入自定义命令…"
-                : model.customCommands.isEmpty ? "按 a 新建自定义命令，例如 aiomp → 指定目录运行 omp" : "没有匹配的命令"
+                : model.customCommands.isEmpty ? "尚无自定义命令" : "没有匹配的命令"
             D.text(message, left, 110, size: 14, color: D.muted, maxWidth: right - left)
         }
         D.rule(left, 168, right - left)
@@ -52,26 +131,10 @@ extension LauncherView {
         switch screen {
         case .list: section = "COMMANDS · \(model.filteredCustomCommands.count) 条" + (model.customQuery.isEmpty ? "" : " · / " + model.customQuery)
         case .edit: section = "CONFIG · " + model.customScreenTitle
-        case .delete: section = "CONFIRM · y / N"
+        case .delete: section = "CONFIRM"
         case .execution: section = "EXECUTION · " + model.customScreenTitle
         }
         D.text(section, left, 192, size: 10.5, color: D.muted, maxWidth: 600)
-        var controls: [(String, CustomCommandAction)] = []
-        switch screen {
-        case .list:
-            controls = [("/ 搜索", .search), ("a 新建", .add)]
-            if model.selectedCustomCommand != nil { controls += [("e 编辑", .edit), ("c 复制", .copy), ("D 删除", .delete), ("Enter 运行", .run)] }
-        case .edit: controls = [("⌘Enter 保存", .save), ("Esc 取消", .cancel)]
-        case .execution: controls = [("e 编辑", .edit), ("Esc 返回", .cancel)]
-        case .delete: controls = [("y 确认删除", .confirmDelete), ("Esc 取消", .cancel)]
-        }
-        var end = right
-        for (label, action) in controls.reversed() {
-            let width = D.width(label, size: 10.5)
-            D.text(label, end, 192, size: 10.5, color: D.muted, align: .right)
-            hit(NSRect(x: end - width - 8, y: 181, width: width + 16, height: 22), label, .custom(action))
-            end -= width + 24
-        }
         switch screen {
         case .list:
             let commands = model.filteredCustomCommands
@@ -94,25 +157,16 @@ extension LauncherView {
             if let command = model.customDraft {
                 for (index, field) in model.customFields.enumerated() {
                     let y = 216 + CGFloat(index) * 26
-                    let selected = index == model.customFieldIndex
+                    let selected = index == model.customFieldIndex && !model.customDirectoryFocused
                     drawCustomSelection(y: y, selected: selected)
                     let value = model.customValue(field, command: command)
                     D.text(String(format: "%02d", index + 1), left, y, size: 10, color: selected ? D.yellow : D.muted)
                     D.text(model.customFieldLabel(field, command: command), 100, y, size: 11, color: selected ? D.mint : D.muted, maxWidth: 160)
                     D.text(value.isEmpty ? "（未填写）" : value, 272, y, size: 12.5, color: selected ? D.paper : D.ink, maxWidth: 966)
-                    if field.isOption { D.text("←→ / 空格改值", right, y, size: 10.5, color: selected ? D.mint : D.muted, align: .right) }
                     hit(NSRect(x: 64, y: y - 11, width: 1312, height: 22), model.customFieldLabel(field, command: command) + "：" + value, .custom(.field(index)), selected: selected)
-                    if field == .directory {
-                        let badge = model.customDirectoryBrowsing ? "浏览中 · Esc 退出" : "Enter 浏览目录"
-                        D.text(badge, right, y, size: 10.5,
-                               color: selected ? D.mint : (model.customDirectoryBrowsing ? D.amber : D.teal), align: .right)
-                    }
                 }
             }
-        case .delete:
-            if let command = model.selectedCustomCommand {
-                D.text("确认删除 :\(command.name)？按 y 确认，n / Enter / Esc 取消。", left, 216, size: 12.5, color: D.red, maxWidth: right - left)
-            }
+        case .delete: break
         case .execution:
             let rows = model.customExecutionRows
             let start = min(max(0, model.bufferOffset), rows.count)
@@ -128,55 +182,43 @@ extension LauncherView {
             }
             if rows.count > LauncherModel.calcVisibleRows { D.text("\(start + 1)–\(end) / \(rows.count) · 滚轮滚动", right, 700, size: 10, color: D.muted, align: .right) }
         }
-        if model.isCustomDirectoryEditing { drawCustomDirectoryChoices() }
+        if model.customStopConfirmation {
+            D.text("停止 :\(model.customExecutionCommand?.name ?? "") 的后台程序？进程将被终止。", left, 664, size: 12, color: D.red, maxWidth: 1296)
+        } else if [.list, .execution].contains(screen), let command = model.customExecutionCommand {
+            let status = model.customExecuting ? (model.canStopCustomExecution ? "运行中" : "正在交接") : "执行结果"
+            let label = "\(status) · :\(command.name) · \(model.customExecutionSummary)"
+            D.text(label, left, 664, size: 11, color: model.customExecutionFailed ? D.red : D.teal, maxWidth: 1030)
+            hit(NSRect(x: left, y: 652, width: 1030, height: 24), "查看任务与结果：" + label, .custom(.results))
+        }
+        if model.isCustomDirectoryEditing, model.customDirectoryFocused { drawCustomDirectoryChoices() }
         if let issue = model.customIssue ?? model.customFeedback {
             D.text(issue, left, 700, size: 12, color: model.customIssue != nil || model.prompt?.error != nil ? D.red : D.amber, maxWidth: right - left)
             hit(NSRect(x: left, y: 688, width: right - left, height: 24), issue)
         }
-        let note: String
-        switch screen {
-        case .list: note = "↑↓ 选择 · 点击选中 / 双击编辑 · Enter 真实运行 · 配置独立保存，不进入书签备份"
-        case .edit: note = model.customDirectoryBrowsing
-                ? "浏览目录：↑↓ 移动 · Tab 选择并进入 · ⇧Tab 上一级 · Enter 退出浏览（保留当前路径）"
-                : model.isCustomDirectoryEditing
-                ? "相对路径基准：\(model.customDirectoryBase.path) · ↑↓ 切字段 · Enter 浏览目录 · ⌘Enter 保存"
-                : model.customDraft?.type == .directory
-                ? "打开目录：选择 Finder 打开文件夹，或选择终端进入目录并保持可输入 · ⌘Enter 保存"
-                : "↑↓ 切换字段 · ←→ / 空格改值 · Enter 下一项 · ⌘Enter 保存 · 参数 {args} / 网址 {query}"
-        case .delete: note = "仅删除命令配置，不删除目标文件 · n / Enter / Esc 取消"
-        case .execution: note = model.customExecuting
-                ? "后台程序运行中 · Esc 终止 · 其余终端／浏览器／Finder 只报告启动交接"
-                : "终端 / 浏览器 / Finder 只报告启动交接；实际命令错误留在终端 · 无终端程序显示退出状态与输出"
-        }
-        D.text(note, left, 726, size: 10, color: D.muted, maxWidth: right - left)
     }
 
     private func drawCustomDirectoryChoices() {
         typealias D = TerminalDrawing
         let choices = model.prompt?.choices ?? []
         let selected = model.prompt?.selectedChoice ?? 0
-        let browsing = model.customDirectoryBrowsing
         let start = max(0, selected - 9)
         let end = min(choices.count, start + 10)
         D.rule(72, 394, 1296)
-        let state = browsing ? "BROWSING" : "READY · Enter 进入"
-        D.text("DIRECTORIES · \(choices.count) 项 · \(state)", 72, 414, size: 10.5,
-               color: browsing ? D.amber : D.muted)
-        D.text(browsing ? "↑↓ 移动 · Tab 选择并进入 · ⇧Tab 上一级 · Enter 退出浏览" : "↑↓ 切字段 · Enter 浏览目录 · 直接输入可筛选",
-               1368, 414, size: 10.5, color: D.muted, align: .right)
+        D.text("DIRECTORIES · \(choices.count) 项 · 目录浏览", 72, 414, size: 10.5, color: D.amber)
         if choices.isEmpty {
-            D.text(model.customDirectoryLoading ? "正在读取目录…" : "无匹配子目录，或目录不可读；可继续输入路径，⌘Enter 保存。",
+            D.text(model.customDirectoryLoading ? "正在读取目录…" : "无可用目录；返回路径字段继续输入。",
                    72, 444, size: 12.5, color: D.muted, maxWidth: 1296)
         }
         for index in start..<end {
             let choice = choices[index]
             let y = 444 + CGFloat(index - start) * 26
-            let active = browsing && index == selected
+            let active = index == selected
             drawCustomSelection(y: y, selected: active)
             if active { D.text("›", 72, y, size: 14, color: D.yellow, bold: true) }
-            let name = URL(fileURLWithPath: choice.label, isDirectory: true).lastPathComponent + "/"
+            let name = choice.detail == "current-directory" ? "使用当前目录 · " + choice.label
+                : URL(fileURLWithPath: choice.label, isDirectory: true).lastPathComponent + "/"
             D.text(name, 100, y, size: 13, color: active ? D.mint : D.teal, maxWidth: 1268)
-            hit(NSRect(x: 64, y: y - 11, width: 1312, height: 22), choice.label, .custom(.directoryChoice(index)), selected: active)
+            hit(NSRect(x: 64, y: y - 11, width: 1312, height: 22), name, .custom(.directoryChoice(index)), selected: active)
         }
         if choices.count > 10 {
             D.text("\(start + 1)–\(end) / \(choices.count)", 1368, 700, size: 10, color: D.muted, align: .right)

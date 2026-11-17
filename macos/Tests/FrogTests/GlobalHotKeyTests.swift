@@ -209,27 +209,31 @@ final class GlobalHotKeyTests: XCTestCase {
         }
         XCTAssertNil(validate(.standard))
         XCTAssertEqual(HotKeyShortcut.standard.display, "⌥Space")
-        for code: UInt32 in [36, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 76, 116, 121, 128] {
+        for code: UInt32 in [54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 128] {
             XCTAssertNotNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(optionKey))), "键码 \(code)")
         }
-        for code: UInt32 in [0, 6, 7, 8, 9, 4, 12, 43, 45, 123, 124] {
+        for code: UInt32 in [36, 53, 76, 116, 121] {
+            XCTAssertNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(optionKey))))
+        }
+        for code: UInt32 in [0, 6, 7, 8, 9, 4, 12, 43, 45, 2, 47, 36, 76, 123, 124, 125] {
             XCTAssertNotNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(cmdKey))))
         }
         XCTAssertNil(validate(HotKeyShortcut(keyCode: 40, modifiers: UInt32(controlKey | optionKey | shiftKey))))
         for code: UInt32 in [123, 124, 125, 126] {
-            XCTAssertNotNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(controlKey))))
-            XCTAssertNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(optionKey))))
+            XCTAssertNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(controlKey))))
+            if [125, 126].contains(code) { XCTAssertNotNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(optionKey)))) }
+            else { XCTAssertNil(validate(HotKeyShortcut(keyCode: code, modifiers: UInt32(optionKey)))) }
         }
         XCTAssertNotNil(validate(HotKeyShortcut(keyCode: 40, modifiers: UInt32(shiftKey))))
     }
 
-    func testSlashCombinationsCannotReplaceSearchFocusCommand() throws {
+    func testModifiedSlashDoesNotReserveUnboundSearchCommands() throws {
         let us = try layout("US")
         func validate(_ shortcut: HotKeyShortcut) -> String? {
             shortcut.validationError(layout: us, menuShortcuts: ApplicationMenuCommand.defaults)
         }
         for modifiers in [cmdKey, optionKey, controlKey] {
-            XCTAssertNotNil(validate(HotKeyShortcut(keyCode: 44, modifiers: UInt32(modifiers))))
+            XCTAssertNil(validate(HotKeyShortcut(keyCode: 44, modifiers: UInt32(modifiers))))
         }
     }
 
@@ -242,7 +246,7 @@ final class GlobalHotKeyTests: XCTestCase {
         XCTAssertNil(HotKeyShortcut(keyCode: 16, modifiers: UInt32(cmdKey)).validationError(layout: us, menuShortcuts: menus))
         XCTAssertNil(HotKeyShortcut(keyCode: 6, modifiers: UInt32(cmdKey)).validationError(layout: german, menuShortcuts: menus))
         let slashCode = try XCTUnwrap((UInt32(0)...127).first { german.characters(keyCode: $0, modifiers: UInt32(shiftKey)) == "/" })
-        XCTAssertNotNil(HotKeyShortcut(keyCode: slashCode, modifiers: UInt32(optionKey | shiftKey)).validationError(layout: german, menuShortcuts: menus))
+        XCTAssertNil(HotKeyShortcut(keyCode: slashCode, modifiers: UInt32(optionKey | shiftKey)).validationError(layout: german, menuShortcuts: menus))
     }
 
     func testActualNestedMenuBindingsIncludingDisabledCommandsAreReserved() throws {

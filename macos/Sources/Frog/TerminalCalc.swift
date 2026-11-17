@@ -6,6 +6,8 @@ extension LauncherModel {
 
     func openCalc() {
         guard prompt == nil, !busy else { return }
+        bufferOrigin = nil
+        calcHistoryFocused = false
         buffer = .calc
         bufferOffset = 0
         calcHistoryIndex = nil
@@ -42,17 +44,15 @@ extension LauncherModel {
 
     func browseCalcHistory(_ direction: Int) {
         guard !calcHistory.isEmpty else { return }
-        let next = calcHistoryIndex.map { $0 + direction } ?? 0
-        guard calcHistory.indices.contains(next) else { return }
+        let next = min(max(0, (calcHistoryIndex ?? 0) + direction), calcHistory.count - 1)
         selectCalcEntry(at: next)
     }
 
     func selectCalcEntry(at index: Int) {
-        guard calcHistory.indices.contains(index) else { return }
+        guard prompt == nil, !busy, calcHistory.indices.contains(index) else { return }
+        calcHistoryFocused = true
+        inputKind = nil
         calcHistoryIndex = index
-        calcExpression = calcHistory[index].expression
-        calcError = nil
-        setInput(.calc, text: calcExpression)
         setCalcFeedback(nil)
         let capacity = LauncherModel.calcVisibleRows
         if index < bufferOffset { bufferOffset = index }
@@ -60,9 +60,21 @@ extension LauncherModel {
         bufferOffset = max(0, min(bufferOffset, max(0, calcHistory.count - capacity)))
     }
 
+    func focusCalcInput() {
+        calcHistoryFocused = false
+        setInput(.calc, text: calcExpression)
+    }
+
+    func loadCalcHistorySelection() {
+        guard let index = calcHistoryIndex, calcHistory.indices.contains(index) else { return }
+        calcExpression = calcHistory[index].expression
+        calcError = nil
+        focusCalcInput()
+    }
+
     func copyCalcResult() {
         let text: String?
-        if let index = calcHistoryIndex, calcHistory.indices.contains(index) {
+        if calcHistoryFocused, let index = calcHistoryIndex, calcHistory.indices.contains(index) {
             text = calcHistory[index].value
         } else if let value = try? TerminalCalculator.evaluate(calcExpression) {
             text = TerminalCalculator.format(value)
@@ -85,6 +97,7 @@ extension LauncherModel {
         calcExpression = ""
         calcHistory = []
         calcHistoryIndex = nil
+        calcHistoryFocused = false
         calcError = nil
         bufferOffset = 0
         setCalcFeedback(nil)
@@ -106,27 +119,33 @@ extension LauncherModel {
     }
 
     func restoreCalcInputIfNeeded() {
-        guard buffer == .calc, inputKind == nil, prompt == nil, !busy else { return }
+        guard buffer == .calc, !calcHistoryFocused, inputKind == nil, prompt == nil, !busy else { return }
         setInput(.calc, text: calcExpression)
     }
 
     /// 键盘事件在输入框之前拦截；只消费计算器自己的按键，其余字符交给字段编辑器。
     func handleCalcKey(_ event: NSEvent, characters: String) -> Bool {
-        switch event.keyCode {
-        case 36, 76: submitCalc(); return true
-        case 125: browseCalcHistory(1); return true
-        case 126: browseCalcHistory(-1); return true
-        case 48: return true
-        case 51, 117, 123, 124, 115, 119: return false
-        default: break
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if event.keyCode == 48, modifiers.isEmpty || modifiers == .shift {
+            if calcHistoryFocused { focusCalcInput() }
+            else if !calcHistory.isEmpty { selectCalcEntry(at: calcHistoryIndex ?? 0) }
+            return true
         }
-        if characters == "=" { submitCalc(); return true }
-        if characters == ":" { startCommand(); return true }
-        if characters.lowercased() == "c" { copyCalcResult(); return true }
-        if characters.count == 1, let character = characters.first {
-            let allowed = Set("0123456789+-*/().eE（）")
-            return !(allowed.contains(character) || character.isWhitespace)
+        if characters == ":", modifiers.isEmpty || modifiers == .shift { startCommand(); return true }
+        if calcHistoryFocused {
+            guard modifiers.isEmpty else { return false }
+            switch event.keyCode {
+            case 36, 76: loadCalcHistorySelection()
+            case 125: browseCalcHistory(1)
+            case 126: browseCalcHistory(-1)
+            case 121: browseCalcHistory(Self.calcVisibleRows)
+            case 116: browseCalcHistory(-Self.calcVisibleRows)
+            default: return false
+            }
+            return true
         }
+        if modifiers.isEmpty, [36, 76].contains(event.keyCode) { submitCalc(); return true }
+        // 字符过滤在文本变更后统一完成；不截走原生选区和光标操作。
         return false
     }
 }
