@@ -99,18 +99,18 @@ public struct BookmarkDocument: Codable, Equatable, Sendable {
         guard format == "frog-bookmarks", schemaVersion == 1 else { throw BookmarkError.unsupportedFormat }
         var ids = Set<String>()
         for group in groups {
-            guard let uuid = UUID(uuidString: group.id), ids.insert(uuid.uuidString).inserted else { throw BookmarkError.invalidData("文件夹 ID 无效或重复。") }
+            guard let uuid = UUID(uuidString: group.id), ids.insert(uuid.uuidString).inserted else { throw BookmarkError.invalidData("文件夹 ID 无效或重复") }
             guard !group.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  group.name.count <= 120, group.order >= 0 else { throw BookmarkError.invalidData("文件夹名称或排序无效。") }
+                  group.name.count <= 120, group.order >= 0 else { throw BookmarkError.invalidData("文件夹名称或排序无效") }
         }
         let groupIDs = Set(groups.map(\.id))
         for bookmark in bookmarks {
-            guard let uuid = UUID(uuidString: bookmark.id), ids.insert(uuid.uuidString).inserted else { throw BookmarkError.invalidData("书签 ID 无效或重复。") }
+            guard let uuid = UUID(uuidString: bookmark.id), ids.insert(uuid.uuidString).inserted else { throw BookmarkError.invalidData("书签 ID 无效或重复") }
             guard !bookmark.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   bookmark.title.count <= 120, bookmark.order >= 0,
-                  bookmark.createdAt.isFinite, bookmark.createdAt >= 0 else { throw BookmarkError.invalidData("书签标题、时间或排序无效。") }
-            guard BookmarkURL.isValid(bookmark.url) else { throw BookmarkError.invalidData("书签网址必须是有效的 http 或 https 地址。") }
-            guard bookmark.groupId == nil || groupIDs.contains(bookmark.groupId!) else { throw BookmarkError.invalidData("书签引用了不存在的文件夹。") }
+                  bookmark.createdAt.isFinite, bookmark.createdAt >= 0 else { throw BookmarkError.invalidData("书签标题、时间或排序无效") }
+            guard BookmarkURL.isValid(bookmark.url) else { throw BookmarkError.invalidData("书签网址须为有效的 http 或 https 地址") }
+            guard bookmark.groupId == nil || groupIDs.contains(bookmark.groupId!) else { throw BookmarkError.invalidData("书签引用了不存在的文件夹") }
         }
         return self
     }
@@ -118,7 +118,7 @@ public struct BookmarkDocument: Codable, Equatable, Sendable {
     public static func decode(_ data: Data) throws -> BookmarkDocument {
         do { return try JSONDecoder().decode(BookmarkDocument.self, from: data).validated() }
         catch let error as BookmarkError { throw error }
-        catch { throw BookmarkError.invalidData("无法解析书签文件，必要字段缺失或 JSON 已损坏。") }
+        catch { throw BookmarkError.invalidData("无法解析书签文件，字段缺失或格式损坏") }
     }
     public func encoded() throws -> Data {
         _ = try validated()
@@ -145,11 +145,11 @@ public enum BookmarkURL {
                   let host = parts.host,
                   (host.contains(".") || host == "localhost" || (host.hasPrefix("[") && host.hasSuffix("]") && host.contains(":"))),
                   !host.hasPrefix("."), !host.hasSuffix(".") else {
-                throw BookmarkError.invalidData("请输入有效网址，例如 example.com。")
+                throw BookmarkError.invalidData("请输入有效网址，例如 example.com")
             }
             result = "https://" + result
         }
-        guard isValid(result) else { throw BookmarkError.invalidData("网址仅支持有效的 http 或 https 地址。") }
+        guard isValid(result) else { throw BookmarkError.invalidData("仅支持有效的 http 或 https 网址") }
         return result
     }
 }
@@ -164,12 +164,12 @@ public enum BookmarkError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .unsupportedFormat: return "该文件不是受支持的青蛙导航书签备份（格式版本 1）。"
+        case .unsupportedFormat: return "不支持的书签备份格式（需 frog-bookmarks v1）"
         case .invalidData(let message): return message
         case .unavailable(let message): return message
-        case .conflict: return "检测到外部更新，已载入最新数据。请重试本次修改；未提交的输入已保留。"
-        case .busy: return "正在处理数据，请稍后重试。"
-        case .sameBackupLocation: return "备份位置不能是正在使用的 bookmarks.json，请另选位置。"
+        case .conflict: return "文件已被外部更新，已载入最新数据；未提交内容已保留，请重试"
+        case .busy: return "正在处理数据，请稍后重试"
+        case .sameBackupLocation: return "备份目标不能是当前正在使用的 bookmarks.json"
         }
     }
 }

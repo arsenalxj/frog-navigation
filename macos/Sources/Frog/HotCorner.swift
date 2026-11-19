@@ -11,6 +11,14 @@ enum ScreenCorner: String, Codable, CaseIterable {
         case .bottomRight: return "right-down"
         }
     }
+    var displayName: String {
+        switch self {
+        case .topLeft: return "左上角"
+        case .bottomLeft: return "左下角"
+        case .topRight: return "右上角"
+        case .bottomRight: return "右下角"
+        }
+    }
     func contains(_ point: CGPoint, in frame: CGRect, size: CGFloat) -> Bool {
         guard frame.width > 0, frame.height > 0,
               point.x >= frame.minX, point.x <= frame.maxX, point.y >= frame.minY, point.y <= frame.maxY else { return false }
@@ -114,7 +122,7 @@ final class NativeHotCornerMonitor: HotCornerEventMonitoring {
     }
     private enum MonitorError: LocalizedError {
         case unavailable
-        var errorDescription: String? { "系统未能启用鼠标监听，请重试。" }
+        var errorDescription: String? { "无法启用鼠标监听，请重试" }
     }
 }
 

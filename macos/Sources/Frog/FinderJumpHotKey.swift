@@ -126,7 +126,7 @@ final class FinderJumpHotKey: FinderJumpHotKeyMonitoring {
 
     private enum MonitoringError: LocalizedError {
         case unavailable
-        var errorDescription: String? { "无法启用 ⌃G，请检查键盘监听权限后重试。目录入口仍可点击。" }
+        var errorDescription: String? { "无法启用 ⌃G，请检查键盘监听权限后重试（浮条仍可点击）" }
     }
 
     deinit {

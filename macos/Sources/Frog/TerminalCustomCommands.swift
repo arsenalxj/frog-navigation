@@ -61,7 +61,7 @@ extension LauncherModel {
 
     func resolvedCustomDirectory(_ raw: String) throws -> URL {
         let value = (raw.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
-        guard !value.isEmpty else { throw CustomCommandError.invalidData("请输入工作目录。") }
+        guard !value.isEmpty else { throw CustomCommandError.invalidData("请输入工作目录") }
         let url = (value.hasPrefix("/") ? URL(fileURLWithPath: value, isDirectory: true)
             : customDirectoryBase.appendingPathComponent(value, isDirectory: true)).standardizedFileURL
         var isDirectory: ObjCBool = false
@@ -112,9 +112,12 @@ extension LauncherModel {
     }
 
     var customDirectoryHint: String {
-        customDirectoryFocused
-            ? "↑↓ 选择 · → 进入 / ← 上级 · Enter 采纳并收起 · Tab / ⇧Tab 切字段 · Esc 取消浏览"
-            : "Tab / ⇧Tab 切字段 · ⌘↓ 浏览目录 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
+        if customDirectoryFocused {
+            return "↑↓ 选择 · ←→ 浏览 · Enter 采纳 · Esc 取消浏览"
+        }
+        let isAddingLast = isCustomAdding && customFieldIndex == customFields.count - 1
+        let enterHint = isCustomAdding && !isAddingLast ? "Enter 下一步 · ⌘Enter 保存" : "Enter 保存"
+        return "Tab / ⇧Tab 切字段 · ⌘↓ 浏览目录 · \(enterHint) · Esc 放弃修改"
     }
 
     func focusCustomDirectoryChoices() {
@@ -239,7 +242,7 @@ extension LauncherModel {
                 if buffer == .commands { bufferOffset = 0 }
             } catch {
                 guard !Task.isCancelled else { return }
-                customIssue = error.localizedDescription + "；修复后执行 :retry 重新读取。"
+                customIssue = error.localizedDescription + "，修复后执行 :retry 重新读取"
                 appendLog(customIssue!, .error)
             }
         }
@@ -279,7 +282,7 @@ extension LauncherModel {
     }
     func beginCustomEdit(_ command: CustomCommand? = nil, copy: Bool = false) {
         guard !busy, !customSaving, customLoaded, customIssue == nil else {
-            customFeedback = customIssue ?? "配置尚未载入，暂不能编辑。"
+            customFeedback = customIssue ?? "配置尚未载入，暂不能编辑"
             return
         }
         refreshCustomTerminals()
@@ -313,14 +316,61 @@ extension LauncherModel {
         customDirectoryPreselectPath = nil
         let field = customField
         if field == .terminal { refreshCustomTerminals() }
+        let isAddingLast = isCustomAdding && customFieldIndex == customFields.count - 1
+        let enterHint = isCustomAdding && !isAddingLast ? "Enter 下一步 · ⌘Enter 保存" : "Enter 保存"
         let hint = field == .directory ? customDirectoryHint
-            : field.isOption ? "Tab / ⇧Tab 切字段 · ←→ / 空格改值 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
-            : "Tab / ⇧Tab 切字段 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
+            : field.isOption ? "↑↓ / ←→ 改值 · Tab 切字段 · \(enterHint) · Esc 放弃修改"
+            : "Tab 切字段 · \(enterHint) · Esc 放弃修改"
         prompt = TerminalPrompt(command: "commands-edit", field: customFieldLabel(field, command: draft),
                                 hint: hint,
                                 acceptsText: !field.isOption)
         setInput(.prompt, text: customValue(field, command: draft))
     }
+
+    var isCustomAdding: Bool {
+        customScreen == .edit && customOriginalName == nil
+    }
+
+    var customOptionItems: [(label: String, selected: Bool)] {
+        guard customScreen == .edit, let draft = customDraft else { return [] }
+        switch customField {
+        case .type:
+            return CustomCommandKind.allCases.map { ($0.label, $0 == draft.type) }
+        case .terminal:
+            return customTerminalOptions.map { (customTerminalLabel($0), $0 == draft.terminal) }
+        default:
+            return []
+        }
+    }
+
+    func selectCustomOption(at index: Int) {
+        guard customScreen == .edit, !customSaving, var draft = customDraft else { return }
+        if customField == .type {
+            let values = CustomCommandKind.allCases
+            guard values.indices.contains(index) else { return }
+            applyCustomKind(values[index], to: &draft)
+        } else if customField == .terminal {
+            refreshCustomTerminals()
+            let values = customTerminalOptions
+            guard values.indices.contains(index) else { return }
+            draft.terminal = values[index]
+        } else { return }
+        customDraft = draft
+        customFeedback = nil
+        showCustomField()
+    }
+
+    private func applyCustomKind(_ kind: CustomCommandKind, to draft: inout CustomCommand) {
+        draft.type = kind
+        if draft.terminal == .finder && draft.type != .directory {
+            draft.terminal = draft.type == .terminal ? installedCustomTerminals.first ?? .terminal : .none
+        }
+        if (draft.type == .terminal || draft.type == .directory), draft.terminal == .none {
+            draft.terminal = installedCustomTerminals.first ?? .terminal
+        }
+        if draft.type == .program { draft.terminal = .none }
+    }
+
     func selectCustomField(_ index: Int) {
         guard customScreen == .edit, !customSaving, customFields.indices.contains(index) else { return }
         if index == customFieldIndex, customField.isOption { cycleCustomOption(1); return }
@@ -329,7 +379,9 @@ extension LauncherModel {
         showCustomField()
     }
     func moveCustomField(_ direction: Int) {
-        let next = min(max(0, customFieldIndex + direction), customFields.count - 1)
+        let count = customFields.count
+        guard count > 1 else { return }
+        let next = (customFieldIndex + direction + count) % count
         guard next != customFieldIndex else { return }
         captureCustomDraft()
         customFieldIndex = next
@@ -344,23 +396,92 @@ extension LauncherModel {
         if customField == .type {
             let values = CustomCommandKind.allCases
             let index = values.firstIndex(of: draft.type) ?? 0
-            draft.type = values[(index + direction + values.count) % values.count]
-            if draft.terminal == .finder && draft.type != .directory {
-                draft.terminal = draft.type == .terminal ? installedCustomTerminals.first ?? .terminal : .none
-            }
-            if (draft.type == .terminal || draft.type == .directory), draft.terminal == .none { draft.terminal = installedCustomTerminals.first ?? .terminal }
-            if draft.type == .program { draft.terminal = .none }
+            applyCustomKind(values[(index + direction + values.count) % values.count], to: &draft)
         } else if customField == .terminal {
             refreshCustomTerminals()
             let values = customTerminalOptions
-            guard !values.isEmpty else { customFeedback = "未检测到受支持终端，请安装 Terminal、iTerm2 或 Ghostty 后重新进入此字段。"; return }
+            guard !values.isEmpty else { customFeedback = "未检测到受支持终端（Terminal / iTerm2 / Ghostty）"; return }
             if let index = values.firstIndex(of: draft.terminal) {
                 draft.terminal = values[(index + direction + values.count) % values.count]
             } else { draft.terminal = direction < 0 ? values[values.count - 1] : values[0] }
         } else { return }
         customDraft = draft
+        customFeedback = nil
         showCustomField()
     }
+
+    func advanceOrSaveCustomDraft() {
+        guard customScreen == .edit, !customSaving else { return }
+        guard isCustomAdding, customFieldIndex < customFields.count - 1 else {
+            saveCustomDraft()
+            return
+        }
+        captureCustomDraft()
+        guard var draft = customDraft else { return }
+        do {
+            try validateCurrentCustomField(&draft)
+            customDraft = draft
+            customFeedback = nil
+            customFieldIndex += 1
+            showCustomField()
+        } catch {
+            prompt?.error = error.localizedDescription
+            customFeedback = error.localizedDescription
+        }
+    }
+
+    private func validateCurrentCustomField(_ draft: inout CustomCommand) throws {
+        let field = customField
+        if customValue(field, command: draft).contains("\0") {
+            throw CustomCommandError.invalidData("字段不能包含空字符")
+        }
+        switch field {
+        case .name:
+            let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard name.range(of: "^[a-z][a-z0-9_-]*$", options: .regularExpression) != nil else {
+                throw CustomCommandError.invalidData("命令名须以字母开头，仅含字母、数字、- 或 _")
+            }
+            guard !Self.reservedCommandNames.contains(name) else {
+                throw CustomCommandError.invalidData("该名称与内置命令冲突")
+            }
+            guard !customCommands.contains(where: { $0.name == name && $0.name != customOriginalName }) else {
+                throw CustomCommandError.invalidData("命令名已存在")
+            }
+        case .title:
+            guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CustomCommandError.invalidData("名称不能为空")
+            }
+        case .type:
+            break
+        case .directory:
+            draft.directory = try resolvedCustomDirectory(draft.directory).path
+        case .target:
+            let target = draft.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else {
+                throw CustomCommandError.invalidData(draft.type == .url ? "网址不能为空" : "执行内容不能为空")
+            }
+            if draft.type == .program {
+                guard target.hasPrefix("/") || target.hasPrefix("~/") else {
+                    throw CustomCommandError.invalidData("程序路径须为绝对路径或 ~/ 开头")
+                }
+            } else if draft.type == .url {
+                let template = target.replacingOccurrences(of: "{query}", with: "query")
+                guard !template.contains(where: { $0.isWhitespace }),
+                      let url = URLComponents(string: template),
+                      ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                      let host = url.host, !host.isEmpty, url.url != nil else {
+                    throw CustomCommandError.invalidData("网址须为有效的 http 或 https 模板（支持 {query}）")
+                }
+            }
+        case .arguments:
+            break
+        case .terminal:
+            if (draft.type == .terminal || draft.type == .directory) && draft.terminal == .none {
+                throw CustomCommandError.invalidData("请选择可用的终端应用")
+            }
+        }
+    }
+
     func saveCustomDraft() {
         guard customScreen == .edit, !customSaving else { return }
         captureCustomDraft()
@@ -369,14 +490,25 @@ extension LauncherModel {
         do {
             if draft.type != .url { draft.directory = try resolvedCustomDirectory(draft.directory).path }
             let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let target = draft.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            let urlValid: Bool = {
+                guard draft.type == .url else { return true }
+                let template = target.replacingOccurrences(of: "{query}", with: "query")
+                guard !template.contains(where: { $0.isWhitespace }),
+                      let url = URLComponents(string: template),
+                      ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                      let host = url.host, !host.isEmpty, url.url != nil else { return false }
+                return true
+            }()
             if let field = customFields.first(where: { customValue($0, command: draft).contains("\0") }) {
                 invalidField = field
             } else if name.range(of: "^[a-z][a-z0-9_-]*$", options: .regularExpression) == nil || Self.reservedCommandNames.contains(name) {
                 invalidField = .name
             } else if draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 invalidField = .title
-            } else if draft.type != .directory && (draft.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || draft.type == .url || draft.type == .program && !draft.target.hasPrefix("/") && !draft.target.hasPrefix("~/")) {
+            } else if draft.type != .directory && (target.isEmpty
+                || !urlValid
+                || (draft.type == .program && !target.hasPrefix("/") && !target.hasPrefix("~/"))) {
                 invalidField = .target
             } else {
                 invalidField = .terminal
@@ -384,7 +516,7 @@ extension LauncherModel {
             let command = try draft.validated(reservedNames: Self.reservedCommandNames)
             invalidField = .name
             guard !customCommands.contains(where: { $0.name == command.name && $0.name != customOriginalName }) else {
-                throw CustomCommandError.invalidData("命令名已存在，请换一个名称。")
+                throw CustomCommandError.invalidData("命令名已存在")
             }
             var next = customCommands
             if let original = customOriginalName, let index = next.firstIndex(where: { $0.name == original }) { next[index] = command }
@@ -425,12 +557,12 @@ extension LauncherModel {
         customDeleteTarget = command
         customScreen = .delete
         customFeedback = nil
-        prompt = TerminalPrompt(command: "commands-delete", field: "删除", hint: "y 确认 · n / Enter / Esc 取消", acceptsText: false)
-        setInput(.prompt, text: ":\(command.name) · 只删除配置")
+        prompt = TerminalPrompt(command: "commands-delete", field: "confirm", hint: "y 确认 · n / Enter / Esc 取消", acceptsText: false)
+        setInput(.prompt, text: ":\(command.name) · 仅删除配置")
     }
     func confirmCustomDelete() {
         guard customScreen == .delete, let command = customDeleteTarget else { return }
-        persistCustomCommands(customCommands.filter { $0.name != command.name }, selecting: nil, message: "已删除 :\(command.name)，未删除目标文件。")
+        persistCustomCommands(customCommands.filter { $0.name != command.name }, selecting: nil, message: "已删除 :\(command.name)")
     }
     func selectCustomCommand(_ index: Int) {
         guard customScreen == .list, !customSaving, filteredCustomCommands.indices.contains(index) else { return }
@@ -486,7 +618,7 @@ extension LauncherModel {
         customStopConfirmation = false
         guard canStopCustomExecution else { return }
         customExecutor.cancelRunningProgram()
-        customExecutionSummary = "已请求停止后台程序；等待实际退出状态…"
+        customExecutionSummary = "正在停止后台程序…"
     }
     func showCustomExecution() {
         guard customExecutionCommand != nil, prompt == nil, !customStopConfirmation else { return }
@@ -495,28 +627,30 @@ extension LauncherModel {
         bufferOffset = 0
     }
     var customKeyboardHint: String {
-        if customStopConfirmation { return "停止当前后台任务？y 确认 · n / Enter / Esc 取消" }
-        if inputKind == .command { return "↑↓ 选择命令 · Tab / ⇧Tab 补全 · ⌥↑↓ 历史 · Enter 执行 · Esc 返回" }
+        if customStopConfirmation { return "停止后台任务？y 停止 · Esc 取消" }
+        if inputKind == .command { return "↑↓ 选择 · Tab 补全 · ⌥↑↓ 历史 · Enter 执行 · Esc 取消" }
         switch customScreen {
         case .edit:
+            let isAddingLast = isCustomAdding && customFieldIndex == customFields.count - 1
+            let enterHint = isCustomAdding && !isAddingLast ? "Enter 下一步 · ⌘Enter 保存" : "Enter 保存"
             return isCustomDirectoryEditing ? customDirectoryHint
-                : customField.isOption ? "Tab / ⇧Tab 切字段 · ←→ / 空格改值 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
-                : "Tab / ⇧Tab 切字段 · Enter / ⌘Enter 保存 · Esc 取消并丢弃草稿"
-        case .delete: return "y 确认删除 · n / Enter / Esc 取消（只删除命令配置）"
-        case .execution: return "↑↓ 滚动 · Page Up/Down 翻屏 · e 编辑 · Esc 返回列表" + (canStopCustomExecution ? " · ⌘. 停止任务" : "")
+                : customField.isOption ? "Tab / ⇧Tab 切字段 · ↑↓ / ←→ 改值 · \(enterHint) · Esc 放弃修改"
+                : "Tab / ⇧Tab 切字段 · \(enterHint) · Esc 放弃修改"
+        case .delete: return "y 删除 · Esc 取消（仅删除配置）"
+        case .execution: return "↑↓ 滚动 · Page Up/Down 翻屏 · e 编辑 · Esc 返回" + (canStopCustomExecution ? " · ⌘. 停止任务" : "")
         case .list:
             if inputKind == .search {
-                return selectedCustomCommand == nil ? "输入筛选命令 · Esc 清空搜索"
-                    : "↑↓ 选择并保留输入 · Tab 进入列表 · Enter 运行 · Esc 清空搜索"
+                return selectedCustomCommand == nil ? "输入筛选命令 · Esc 清空"
+                    : "↑↓ 选择 · Tab 进列表 · Enter 运行 · Esc 清空"
             }
-            let actions = selectedCustomCommand == nil ? "/ / ⇧Tab 搜索 · a / ⌘N 新建"
-                : "↑↓ 选择 · ⇧Tab 搜索 · Enter 运行 · a / ⌘N 新建 · e 编辑 · ⌘C 复制调用 · ⌘D 创建副本 · ⇧D 删除"
+            let actions = selectedCustomCommand == nil ? "/ 搜索 · a 新建"
+                : "↑↓ 选择 · Enter 运行 · a 新建 · e 编辑 · ⌘C 复制 · ⌘D 副本 · ⇧D 删除"
             return actions + (canStopCustomExecution ? " · ⌘. 停止任务" : "")
         }
     }
     func executeCustomCommand(_ command: CustomCommand, input: String = "") {
         guard !customExecuting, !customSaving, customLoaded else {
-            commandError(customExecuting ? "已有自定义命令正在执行，请等待该进程结束。" : "自定义命令配置尚未就绪。")
+            commandError(customExecuting ? "已有任务正在运行，请等待结束" : "自定义命令配置尚未就绪")
             return
         }
         inputKind = nil
@@ -573,7 +707,7 @@ extension LauncherModel {
             }
             guard modifiers.isEmpty else { return false }
             if [36, 76].contains(event.keyCode) {
-                if customDirectoryFocused { acceptCustomDirectoryChoice() } else { saveCustomDraft() }
+                if customDirectoryFocused { acceptCustomDirectoryChoice() } else { advanceOrSaveCustomDraft() }
                 return true
             }
             if customDirectoryFocused {
@@ -589,7 +723,9 @@ extension LauncherModel {
                 return true
             }
             if customField.isOption {
-                if text == " " || [123, 124].contains(event.keyCode) { cycleCustomOption(event.keyCode == 123 ? -1 : 1) }
+                if text == " " || [123, 124, 125, 126].contains(event.keyCode) {
+                    cycleCustomOption([123, 126].contains(event.keyCode) ? -1 : 1)
+                }
                 return true
             }
             return false
@@ -622,6 +758,7 @@ extension LauncherModel {
             if modifiers == .shift, event.keyCode == 48 { startCustomSearch(); return true }
             if modifiers == .shift, text == "D" { requestCustomDelete(); return true }
             if modifiers == .shift, text == "G" { customIndex = max(0, filteredCustomCommands.count - 1); clampCustomSelection(); return true }
+            if modifiers == .shift, text == "?" { openBuffer(.help); return true }
         }
         if text == ":", modifiers.isEmpty || modifiers == .shift { startCommand(); return true }
         guard modifiers.isEmpty, !isTextEditing else { return false }
@@ -647,6 +784,7 @@ extension LauncherModel {
         case "a": addCurrentObject()
         case "e": if let command = selectedCustomCommand { beginCustomEdit(command) }
         case "/": startCustomSearch()
+        case ",": openSettings()
         case "g": customIndex = 0; clampCustomSelection()
         default: return false
         }

@@ -94,7 +94,7 @@ enum LauncherKeyboardCommand: Equatable {
     static func match(keyCode: UInt32, modifiers: UInt32, characters: String?) -> LauncherKeyboardCommand? {
         if modifiers == UInt32(cmdKey) {
             if characters == "," { return .settings }
-            if ["c", "d", "n", "."].contains(characters?.lowercased() ?? "") || [36, 76].contains(keyCode) { return .objectAction }
+            if ["c", "d", "n", "."].contains(characters?.lowercased() ?? "") || [36, 51, 76].contains(keyCode) { return .objectAction }
             if keyCode == 125 { return .objectAction }
             if [123, 124].contains(keyCode) { return .textNavigation }
         }

@@ -76,23 +76,27 @@ final class LauncherModel: ObservableObject {
 
     var dismissWindow: (() -> Void)?
     var terminateApplication: (() -> Void)?
+    var readClipboardString: () -> String? = { NSPasteboard.general.string(forType: .string) }
     var document: BookmarkDocument { store.document }
     var visibleRowCount: Int { 19 }
     enum SearchAction {
-        case finish, openSelection, openSearch
+        case finish, openSelection, openURL, webSearch
 
         var title: String {
             switch self {
             case .finish: return "结束搜索"
-            case .openSelection: return "打开结果"
-            case .openSearch: return "打开网址 / 网页搜索"
+            case .openSelection: return "打开"
+            case .openURL: return "打开网址"
+            case .webSearch: return "Google 搜索"
             }
         }
     }
 
     var searchAction: SearchAction {
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .finish }
-        return items.isEmpty ? .openSearch : .openSelection
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .finish }
+        if !items.isEmpty { return .openSelection }
+        return (try? BookmarkURL.normalize(trimmed)) != nil ? .openURL : .webSearch
     }
 
     var isTextInputActive: Bool {
@@ -116,7 +120,9 @@ final class LauncherModel: ObservableObject {
         var id: String?
         var kind: TerminalItemKind = .bookmark
         var url = ""
-        var title: String?
+        var title = ""
+        var titleEdited = false
+        var prefilledFromClipboard = false
         var location = "__root__"
         var folderName = ""
         var path = ""
@@ -182,7 +188,7 @@ final class LauncherModel: ObservableObject {
             if self.prompt?.command == "hotkey", self.hotKey?.recording == false {
                 self.finishPrompt()
                 if let error = self.hotKey?.error { self.appendLog(error, .error) }
-                else { self.appendLog("快捷键录入已结束；当前绑定：\(self.hotKey?.configuration.shortcut.display ?? "")", .info) }
+                else { self.appendLog("快捷键已设为 \(self.hotKey?.configuration.shortcut.display ?? "")", .info) }
             } else if self.prompt?.command == "hotkey" {
                 self.prompt?.error = self.hotKey?.error
             }
@@ -208,7 +214,7 @@ final class LauncherModel: ObservableObject {
         rebuildSettings()
         if store.isLoaded && !loadedWasLogged {
             loadedWasLogged = true
-            appendLog("青蛙导航 · \(document.bookmarks.count) bookmarks · \(document.groups.count) groups · UTF-8", .success)
+            appendLog("已载入 \(document.bookmarks.count) 条书签，\(document.groups.count) 个文件夹", .success)
         }
         if let issue = store.issue, issue != lastIssue { appendLog(issue, .error) }
         lastIssue = store.issue
@@ -273,7 +279,8 @@ final class LauncherModel: ObservableObject {
         persistExpanded()
         rebuildItems(selecting: id)
         let count = document.bookmarks(in: id).count
-        appendLog("\(expanding ? "展开" : "折叠")文件夹 \(document.groups.first { $0.id == id }?.name ?? "")（\(count) 项）", .info)
+        let name = document.groups.first { $0.id == id }?.name ?? ""
+        appendLog(expanding ? "已展开“\(name)”（\(count) 项）" : "已折叠“\(name)”", .info)
     }
 
     func toggleAllExpanded() {
@@ -285,7 +292,7 @@ final class LauncherModel: ObservableObject {
         expandedGroupIDs = allOpen ? [] : ids
         persistExpanded()
         rebuildItems(selecting: keep)
-        appendLog(allOpen ? "折叠全部文件夹" : "展开全部 \(ids.count) 个文件夹", .info)
+        appendLog(allOpen ? "已折叠全部文件夹" : "已展开全部 \(ids.count) 个文件夹", .info)
     }
 
     func clampSelection() {
@@ -354,6 +361,9 @@ final class LauncherModel: ObservableObject {
             calcError = nil
             setCalcFeedback(nil)
             return
+        }
+        if inputKind == .prompt, prompt?.field == "title", value != inputText {
+            draft.titleEdited = true
         }
         inputText = value
         if inputKind == .search {
@@ -503,9 +513,16 @@ final class LauncherModel: ObservableObject {
         guard !operationActive else { return }
         if inputKind == .command { cancelCommand(); return }
         if isCommandsEditing { escapeCustomCommands(); return }
-        if prompt != nil {
-            if prompt?.command == "hotkey" { hotKey?.cancelRecording() }
-            finishPrompt()
+        if let prompt {
+            if prompt.choicesFocused {
+                self.prompt?.choicesFocused = false
+            } else if ["location", "to"].contains(prompt.field), !inputText.isEmpty {
+                setInput(.prompt, text: "")
+                refreshPromptChoices(filter: false)
+            } else {
+                if prompt.command == "hotkey" { hotKey?.cancelRecording() }
+                finishPrompt()
+            }
         } else if buffer == .calc {
             if calcHistoryFocused { focusCalcInput() }
             else { closeBuffer() }
@@ -525,7 +542,7 @@ final class LauncherModel: ObservableObject {
         if customStopConfirmation { cancelCustomStop(); return }
         if isCommandsEditing, inputKind != .command {
             if customScreen == .edit {
-                if customDirectoryFocused { acceptCustomDirectoryChoice() } else { saveCustomDraft() }
+                if customDirectoryFocused { acceptCustomDirectoryChoice() } else { advanceOrSaveCustomDraft() }
             }
             else if customScreen == .delete { escapeCustomCommands() }
             else if inputKind == .search, let command = selectedCustomCommand { executeCustomCommand(command) }
@@ -536,7 +553,7 @@ final class LauncherModel: ObservableObject {
                 if prompt.command != "hotkey" { finishPrompt() }
             } else if prompt.choicesFocused {
                 choosePromptOption(at: prompt.selectedChoice)
-            } else { submitPrompt() }
+            } else { advanceOrSubmitPrompt() }
         } else if inputKind == .calc {
             submitCalc()
         } else if inputKind == .command {
@@ -552,17 +569,17 @@ final class LauncherModel: ObservableObject {
             switch searchAction {
             case .finish: escape()
             case .openSelection: activateSelection()
-            case .openSearch: openSearch()
+            case .openURL, .webSearch: openSearch()
             }
         }
     }
 
     func openURL(_ url: URL, label: String) {
         if NSWorkspace.shared.open(url) {
-            appendLog("已打开 \(label) · \(url.absoluteString)", .success)
+            appendLog("已打开 \(label)", .success)
             inputKind = nil
             dismissWindow?()
-        } else { appendLog("系统未能打开 \(url.absoluteString)", .error) }
+        } else { appendLog("无法打开 \(url.absoluteString)", .error) }
     }
 
     func openSearch() {
@@ -572,7 +589,7 @@ final class LauncherModel: ObservableObject {
         } else {
             var components = URLComponents(string: "https://www.google.com/search")!
             components.queryItems = [URLQueryItem(name: "q", value: text)]
-            if let url = components.url { openURL(url, label: "搜索 “\(text)”") }
+            if let url = components.url { openURL(url, label: "Google 搜索“\(text)”") }
         }
     }
 
@@ -580,8 +597,8 @@ final class LauncherModel: ObservableObject {
         guard let bookmark = selectedBookmark() else { return }
         NSPasteboard.general.clearContents()
         if NSPasteboard.general.setString(bookmark.url, forType: .string) {
-            appendLog("已复制链接 \(bookmark.url)", .success)
-        } else { appendLog("系统剪贴板未能写入链接。", .error) }
+            appendLog("已复制网址：\(bookmark.title)", .success)
+        } else { appendLog("无法写入剪贴板", .error) }
     }
     var canAddCurrentObject: Bool {
         prompt == nil && !busy && !customSaving && !customStopConfirmation && inputKind == nil
@@ -622,11 +639,11 @@ final class LauncherModel: ObservableObject {
         case nil: copySelection()
         case .calc: copyCalcResult()
         case .commands where customScreen == .list:
-            guard let command = selectedCustomCommand else { customFeedback = "没有可复制的命令。"; return }
+            guard let command = selectedCustomCommand else { customFeedback = "没有可复制的命令"; return }
             NSPasteboard.general.clearContents()
             customFeedback = NSPasteboard.general.setString(":" + command.name, forType: .string)
-                ? "已复制 :\(command.name)" : "系统剪贴板未能写入命令。"
-        default: appendLog("当前页面没有可复制的对象。", .warning)
+                ? "已复制 :\(command.name)" : "无法写入剪贴板"
+        default: appendLog("当前页面没有可复制的内容", .warning)
         }
     }
 
@@ -640,7 +657,7 @@ final class LauncherModel: ObservableObject {
     func selectedBookmark() -> Bookmark? {
         guard items.indices.contains(selectedIndex), items[selectedIndex].kind == .bookmark,
               let bookmark = document.bookmarks.first(where: { $0.id == items[selectedIndex].id }) else {
-            appendLog("请选择书签。", .error)
+            appendLog("请选择书签", .error)
             return nil
         }
         return bookmark
@@ -648,7 +665,7 @@ final class LauncherModel: ObservableObject {
 
     func toggleOrganizing() {
         guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            appendLog("搜索结果不能排序；先按 Esc 清空搜索。", .warning)
+            appendLog("搜索时无法整理，请先按 Esc 清空搜索", .warning)
             return
         }
         isOrganizing.toggle()
@@ -674,12 +691,12 @@ final class LauncherModel: ObservableObject {
         if let destinationGroupID { expandedGroupIDs.insert(destinationGroupID) }
         mutate("已移动书签", closePrompt: false) { document in
             guard let source = document.bookmarks.first(where: { $0.id == sourceID }) else {
-                throw BookmarkError.invalidData("书签已不存在。")
+                throw BookmarkError.invalidData("书签已不存在")
             }
             if merge {
                 guard let targetID, source.groupId == nil,
                       document.bookmarks.contains(where: { $0.id == targetID && $0.groupId == nil }) else {
-                    throw BookmarkError.invalidData("仅可将两条根目录书签合并。")
+                    throw BookmarkError.invalidData("仅可合并根目录下的书签")
                 }
                 var name = "新建文件夹"
                 var suffix = 2
@@ -698,7 +715,7 @@ final class LauncherModel: ObservableObject {
                 return sourceID
             }
             guard let target = document.bookmarks.first(where: { $0.id == targetID }) else {
-                throw BookmarkError.invalidData("拖拽目标已改变，请重试。")
+                throw BookmarkError.invalidData("拖拽目标已变化，请重试")
             }
             let peers = document.bookmarks(in: target.groupId).filter { $0.id != sourceID }
             let index = peers.firstIndex { $0.id == targetID }!
@@ -717,6 +734,10 @@ final class LauncherModel: ObservableObject {
             do {
                 var selection: String?
                 try await store.apply { selection = try mutation(&$0) }
+                if let selection,
+                   let groupID = document.bookmarks.first(where: { $0.id == selection })?.groupId {
+                    expandedGroupIDs.insert(groupID)
+                }
                 if closePrompt { finishPrompt() }
                 rebuildItems(selecting: selection)
                 persistExpanded()
@@ -741,7 +762,7 @@ final class LauncherModel: ObservableObject {
         logs.append(makeEntry(text, level))
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
         if let row = settingsRows.firstIndex(where: { $0.key == "log" }) {
-            settingsRows[row].value = "\(logs.count) lines"
+            settingsRows[row].value = "\(logs.count) 条"
         }
         if buffer == .log { bufferOffset = min(bufferOffset, max(0, logs.count - 32)) }
     }
@@ -755,6 +776,9 @@ final class LauncherModel: ObservableObject {
             if text == "," { openSettings(); return true }
             if text.lowercased() == "c", canCopyCurrentObject { copyCurrentObject(); return true }
             if text.lowercased() == "n" { addCurrentObject(); return true }
+            if buffer == .calc, inputKind != .command, prompt == nil, event.keyCode == 51 {
+                return handleCalcKey(event, characters: event.characters ?? "")
+            }
         }
         if isCommandsEditing, inputKind != .command { return handleCustomCommandKey(event, isTextEditing: isTextEditing) }
         if let prompt {

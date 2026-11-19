@@ -30,7 +30,7 @@ actor BookmarkDisk {
             try atomicWrite(data, to: url, expected: nil, onlyIfMissing: true)
             result = DiskSnapshot(document: seed, bytes: data)
         } else {
-            throw BookmarkError.unavailable("当前数据文件暂时不可用，已保留所选目录。请恢复 bookmarks.json 后重试，或选择其他目录。")
+            throw BookmarkError.unavailable("数据文件不可用，已保留所选目录；恢复 bookmarks.json 后重试或更换目录")
         }
         directory = target
         snapshot = result.bytes
@@ -39,7 +39,7 @@ actor BookmarkDisk {
     }
 
     func reload() throws -> DiskSnapshot {
-        guard let directory else { throw BookmarkError.unavailable("数据目录尚未成功载入，请先重试读取。") }
+        guard let directory else { throw BookmarkError.unavailable("数据尚未载入，请重试") }
         do {
             try checkDirectory(directory)
             let current = try read(directory.appendingPathComponent("bookmarks.json"))
@@ -53,7 +53,7 @@ actor BookmarkDisk {
     }
 
     func save(_ document: BookmarkDocument) throws -> DiskSnapshot {
-        guard let directory, let snapshot else { throw BookmarkError.unavailable("数据尚未成功载入，无法保存。请先重试读取。") }
+        guard let directory, let snapshot else { throw BookmarkError.unavailable("数据尚未载入，无法保存") }
         if let unavailableReason { throw BookmarkError.unavailable(unavailableReason) }
         do {
             try checkDirectory(directory)
@@ -71,7 +71,7 @@ actor BookmarkDisk {
     }
 
     func export(to destination: URL) throws -> DiskSnapshot {
-        guard let directory, let snapshot else { throw BookmarkError.unavailable("请先载入数据目录。") }
+        guard let directory, let snapshot else { throw BookmarkError.unavailable("请先载入数据目录") }
         let mainURL = directory.appendingPathComponent("bookmarks.json")
         if sameFile(mainURL, destination) { throw BookmarkError.sameBackupLocation }
         let current = DiskSnapshot(document: try BookmarkDocument.decode(snapshot), bytes: snapshot)
@@ -96,46 +96,46 @@ actor BookmarkDisk {
             result = Result { try self.readUncoordinated(coordinatedURL) }
         }
         if let coordinatorError { throw BookmarkError.unavailable("读取书签文件失败：\(coordinatorError.localizedDescription)") }
-        guard let result else { throw BookmarkError.unavailable("无法读取书签文件，请检查文件权限。") }
+        guard let result else { throw BookmarkError.unavailable("无法读取书签文件，请检查权限") }
         return try result.get()
     }
 
     private func readUncoordinated(_ url: URL) throws -> DiskSnapshot {
         guard manager.fileExists(atPath: url.path) else {
-            throw BookmarkError.unavailable("bookmarks.json 暂时缺失，已保留当前数据并暂停写入。请恢复文件后重试。")
+            throw BookmarkError.unavailable("bookmarks.json 缺失，已保留当前数据并暂停写入")
         }
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-        guard values.isRegularFile == true else { throw BookmarkError.invalidData("书签数据必须是普通 JSON 文件。") }
-        guard (values.fileSize ?? 0) <= sizeLimit else { throw BookmarkError.invalidData("书签文件超过 32 MB，无法读取。") }
+        guard values.isRegularFile == true else { throw BookmarkError.invalidData("书签数据须为普通 JSON 文件") }
+        guard (values.fileSize ?? 0) <= sizeLimit else { throw BookmarkError.invalidData("书签文件超过 32 MB，无法读取") }
         let bytes = try Data(contentsOf: url)
-        guard bytes.count <= sizeLimit else { throw BookmarkError.invalidData("书签文件超过 32 MB，无法读取。") }
+        guard bytes.count <= sizeLimit else { throw BookmarkError.invalidData("书签文件超过 32 MB，无法读取") }
         return DiskSnapshot(document: try BookmarkDocument.decode(bytes), bytes: bytes)
     }
 
     private func checkDirectory(_ url: URL) throws {
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw BookmarkError.unavailable("数据目录不存在或暂时不可用：\(url.path)")
+            throw BookmarkError.unavailable("数据目录不存在或不可用：\(url.path)")
         }
         guard manager.isReadableFile(atPath: url.path), manager.isWritableFile(atPath: url.path) else {
-            throw BookmarkError.unavailable("数据目录没有读写权限：\(url.path)")
+            throw BookmarkError.unavailable("数据目录缺少读写权限：\(url.path)")
         }
         let main = url.appendingPathComponent("bookmarks.json")
         if manager.fileExists(atPath: main.path),
            (!manager.isReadableFile(atPath: main.path) || !manager.isWritableFile(atPath: main.path)) {
-            throw BookmarkError.unavailable("bookmarks.json 没有读写权限，请修改文件权限或选择其他目录。")
+            throw BookmarkError.unavailable("bookmarks.json 缺少读写权限")
         }
     }
 
     private func atomicWrite(_ bytes: Data, to destination: URL, expected: Data?, onlyIfMissing: Bool = false) throws {
         guard bytes.count <= sizeLimit else {
-            throw BookmarkError.invalidData("书签数据超过 32 MB，无法保存。请减少数据量后重试；原文件保持不变。")
+            throw BookmarkError.invalidData("书签数据超过 32 MB，无法保存；原文件已保留")
         }
         let parent = destination.deletingLastPathComponent()
         let temporary = parent.appendingPathComponent(".frog-\(UUID().uuidString).tmp")
         defer { try? manager.removeItem(at: temporary) }
         guard manager.createFile(atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
-            throw BookmarkError.unavailable("无法在目标目录创建临时文件，请检查写入权限。")
+            throw BookmarkError.unavailable("无法在目标目录创建临时文件，请检查写入权限")
         }
         let handle = try FileHandle(forWritingTo: temporary)
         do { try handle.write(contentsOf: bytes); try handle.synchronize(); try handle.close() }
@@ -149,17 +149,17 @@ actor BookmarkDisk {
                     let current = try self.readUncoordinated(coordinatedURL)
                     guard current.bytes == expected else { throw DiskFailure.externalChange(current) }
                 } else if onlyIfMissing && self.manager.fileExists(atPath: coordinatedURL.path) {
-                    throw BookmarkError.unavailable("目标目录刚收到外部数据，请重新选择该目录。")
+                    throw BookmarkError.unavailable("目标目录已出现外部数据，请重新选择")
                 }
                 guard rename(temporary.path, coordinatedURL.path) == 0 else {
-                    throw BookmarkError.unavailable("保存文件失败：\(String(cString: strerror(errno)))")
+                    throw BookmarkError.unavailable("保存失败：\(String(cString: strerror(errno)))")
                 }
                 let directoryFD = Darwin.open(parent.path, O_RDONLY)
                 if directoryFD >= 0 { _ = fsync(directoryFD); close(directoryFD) }
             }
         }
-        if let coordinatorError { throw BookmarkError.unavailable("保存文件失败：\(coordinatorError.localizedDescription)") }
-        guard let result else { throw BookmarkError.unavailable("无法完成原子保存，请重试。") }
+        if let coordinatorError { throw BookmarkError.unavailable("保存失败：\(coordinatorError.localizedDescription)") }
+        guard let result else { throw BookmarkError.unavailable("保存失败，请重试") }
         try result.get()
     }
 
@@ -170,5 +170,5 @@ actor BookmarkDisk {
         return leftID != nil && leftID == rightID
     }
 
-    private func describe(_ error: Error) -> String { "\(error.localizedDescription) 已保留当前数据，请重试读取后继续。" }
+    private func describe(_ error: Error) -> String { "\(error.localizedDescription)；当前数据已保留" }
 }

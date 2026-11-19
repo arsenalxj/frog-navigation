@@ -52,18 +52,38 @@ extension LauncherView {
             }
             if !row.command.isEmpty {
                 D.text(row.command, 840, y, size: 10.5, color: D.muted, maxWidth: 550)
-                hit(NSRect(x: 840, y: y - 10, width: 550, height: 20), row.command)
+                hit(NSRect(x: 840, y: y - 10, width: 550, height: 20), row.command, Self.settingAction(for: row.command))
             }
         }
         bufferPosition(start: start, end: end, count: model.settingsRows.count)
     }
 
+    static func settingAction(for commandText: String) -> Action? {
+        let trimmed = commandText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(":") else { return nil }
+        let body = String(trimmed.dropFirst())
+        if ["log", "commands", "retry", "import edge"].contains(body) { return .command(body) }
+        if body.hasPrefix("cd ") { return .command("cd") }
+        if body.hasPrefix("backup") { return .command("backup") }
+        if body.hasPrefix("restore") { return .command("restore") }
+        if body.hasPrefix("set ") {
+            let parts = body.split(separator: " ", omittingEmptySubsequences: true)
+            if parts.count >= 2 {
+                if parts.count == 3, !parts[2].contains("/") {
+                    return .command(body)
+                }
+                return .draft(parts[0] + " " + parts[1])
+            }
+        }
+        return .draft(body)
+    }
+
     private func drawHelp() {
         typealias D = TerminalDrawing
         D.text("NAME", 64, 84, size: 12, color: D.green, bold: true)
-        D.text("青蛙导航 — 本地书签启动台。所有操作在命令行完成。", 340, 84, size: 12)
+        D.text("青蛙导航 — 本地书签启动台", 340, 84, size: 12)
         D.text("SYNOPSIS", 64, 114, size: 12, color: D.green, bold: true)
-        D.text("frog [command] · j/k 选择 · : 命令 · / 搜索", 340, 114, size: 12)
+        D.text("frog [command] · ↑↓ / j/k 选择 · : 命令 · / 搜索", 340, 114, size: 12)
         D.text("COMMANDS", 64, 148, size: 12, color: D.green, bold: true)
         let start = min(max(0, model.bufferOffset), model.commands.count)
         let end = min(model.commands.count, start + 21)
@@ -71,17 +91,18 @@ extension LauncherView {
             let command = model.commands[index]
             let y = 172 + CGFloat(index - start) * 20
             D.text(":" + command.name, 64, y, size: 12, color: D.teal, bold: true, maxWidth: 260)
-            D.text(command.summary, 340, y, size: 11.5, maxWidth: 400)
-            D.text(command.usage + (command.detail.isEmpty ? "" : " · " + command.detail), 760, y, size: 10.5, color: D.muted, maxWidth: 250)
-            hit(NSRect(x: 64, y: y - 10, width: 946, height: 20), "\(command.usage)，\(command.summary)。\(command.detail)", .draft(command.name))
+            D.text(command.summary, 340, y, size: 11.5, maxWidth: 260)
+            D.text(command.detail.isEmpty ? command.usage : command.detail, 620, y, size: 10.5, color: D.muted, maxWidth: 390)
+            hit(NSRect(x: 64, y: y - 10, width: 946, height: 20), "\(command.usage) · \(command.summary)\(command.detail.isEmpty ? "" : "（\(command.detail)）")", .draft(command.name))
         }
         D.rect(NSRect(x: 1030, y: 142, width: 1, height: 442), D.line)
-        D.text("KEYS · 列表模式", 1080, 148, size: 12, color: D.green, bold: true)
+        D.text("KEYS", 1080, 148, size: 12, color: D.green, bold: true)
         let shortcuts = [
-            ("j/k · ↑/↓", "移动"), ("g/G", "首项 / 末项"), ("PageUp/Down", "滚动"), ("Enter", "打开 / 确认"),
-            ("/", "搜索"), (":", "命令"), ("a · ⌘N", "添加书签"), ("n", "新建文件夹"), ("e", "编辑 / 重命名"),
-            ("m", "移动书签"), ("⇧D", "删除确认"), ("⌘C", "复制网址"), ("o", "整理"),
-            ("Shift+↑/↓", "书签排序"), ("←→", "折叠 / 展开"), ("z", "全部展开"), ("Tab / ⇧Tab", "切换焦点"), ("⌘,", "设置"), ("?", "帮助"), ("Esc", "取消 / 返回")
+            ("↑/↓ · j/k", "选择"), ("g/G", "首项 / 末项"), ("PageUp/Down", "翻页"), ("Enter", "打开 / 下一步"),
+            ("⌘Enter", "保存全部"), ("/", "搜索"), (":", "命令"), ("a · ⌘N", "添加书签"), ("n", "新建文件夹"),
+            ("e", "编辑 / 重命名"), ("m", "移动书签"), ("⇧D", "删除"), ("⌘C", "复制"), ("o", "整理"),
+            ("⇧↑/↓", "同组排序"), ("←→", "折叠 / 展开"), ("z", "全部展开"), ("Tab / ⇧Tab", "切字段 / 焦点"),
+            ("⌘,", "设置"), ("?", "帮助"), ("Esc", "取消 / 返回")
         ]
         for (index, shortcut) in shortcuts.enumerated() {
             let y = 172 + CGFloat(index) * 20
@@ -91,18 +112,18 @@ extension LauncherView {
         D.rule(64, 584, 936)
         D.text("EXAMPLES", 64, 604, size: 12, color: D.green, bold: true)
         let examples = [
-            ("add", "Tab 切换网址 / 标题 / 位置，Enter 保存全部"),
-            ("edit url", "修改当前书签网址"),
-            ("delete", "命令行 y/N 确认删除"),
-            ("set corner right-up", "修改屏幕触角"),
-            ("backup", "输入备份文件路径，导出 JSON"),
-            ("calc", "打开计算器；Tab 历史，⌘C 复制结果")
+            ("add", "Enter 逐项推进，⌘Enter 直接保存"),
+            ("edit url", "修改所选书签网址"),
+            ("delete", "按 y 确认删除"),
+            ("set corner right-up", "将屏幕触角设为右上角"),
+            ("backup", "导出 JSON 备份"),
+            ("calc", "打开计算器，⌘C 复制，⌘⌫ 清空")
         ]
         for (index, example) in examples.enumerated() {
             let y = 626 + CGFloat(index) * 17
             D.text(":" + example.0, 64, y, size: 11.5, color: D.ink2, maxWidth: 370)
             D.text(example.1, 460, y, size: 11.5, color: D.ink2, maxWidth: 540)
-            hit(NSRect(x: 64, y: y - 8, width: 936, height: 17), ":\(example.0)，\(example.1)", .draft(example.0))
+            hit(NSRect(x: 64, y: y - 8, width: 936, height: 17), ":\(example.0) · \(example.1)", .draft(example.0))
         }
         let file = model.store.directory.appendingPathComponent("bookmarks.json").path
         D.text("FILES: " + file, 64, 726, size: 10, color: D.muted, maxWidth: 1336)
@@ -113,7 +134,7 @@ extension LauncherView {
         typealias D = TerminalDrawing
         let start = min(max(0, model.bufferOffset), model.logs.count)
         let end = min(model.logs.count, start + 32)
-        if model.logs.isEmpty { D.text("日志为空。", 72, 84, size: 12, color: D.muted) }
+        if model.logs.isEmpty { D.text("暂无日志", 72, 84, size: 12, color: D.muted) }
         for index in start..<end {
             let line = model.logs[index]
             let y = 84 + CGFloat(index - start) * 20
@@ -181,7 +202,7 @@ extension LauncherView {
     private func drawJob() {
         typealias D = TerminalDrawing
         guard let job = model.job else {
-            D.text("尚无任务输出。", 72, 84, size: 12, color: D.muted)
+            D.text("暂无任务记录", 72, 84, size: 12, color: D.muted)
             return
         }
         D.text("TASK", 72, 84, size: 11, color: D.muted)
@@ -208,15 +229,15 @@ extension LauncherView {
             hit(NSRect(x: 72, y: y - 12, width: 1296, height: 24), line.text)
         }
         if job.status == .running, end - start < 24 {
-            D.text("▊ 运行中…", 72, 142 + CGFloat(end - start) * 24, size: 12, color: D.amber)
+            D.text("▊ 处理中…", 72, 142 + CGFloat(end - start) * 24, size: 12, color: D.amber)
         }
-        D.text("命令与执行结果已记录到日志。", 40, 728, size: 10, color: D.muted)
+        D.text("记录已写入日志", 40, 728, size: 10, color: D.muted)
         bufferPosition(start: start, end: end, count: job.lines.count)
     }
 
     private func bufferPosition(start: Int, end: Int, count: Int) {
         guard start > 0 || end < count else { return }
-        TerminalDrawing.text("\(count == 0 ? 0 : start + 1)–\(end) / \(count) · 滚轮滚动", 1400, 728,
+        TerminalDrawing.text("\(count == 0 ? 0 : start + 1)–\(end) / \(count)", 1400, 728,
                              size: 10, color: TerminalDrawing.muted, align: .right)
     }
 }

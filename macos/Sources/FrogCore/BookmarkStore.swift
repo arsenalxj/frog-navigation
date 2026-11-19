@@ -45,7 +45,7 @@ public final class BookmarkStore: ObservableObject {
                     defaults.set(refreshed, forKey: Self.directoryBookmarkKey)
                 }
             } catch {
-                initialLocationError = "无法恢复数据目录访问权限。请在设置中重新选择该目录：\(directory.path)"
+                initialLocationError = "无法访问数据目录，请用 :cd 重新选择：\(directory.path)"
             }
         }
     }
@@ -84,7 +84,7 @@ public final class BookmarkStore: ObservableObject {
         await acquire()
         defer { release() }
         do {
-            guard isLoaded else { throw BookmarkError.unavailable("数据尚未成功载入，请先重试读取或选择其他目录。") }
+            guard isLoaded else { throw BookmarkError.unavailable("数据尚未载入，请执行 :retry 或 :cd") }
             var next = document
             try mutation(&next)
             _ = try next.validated()

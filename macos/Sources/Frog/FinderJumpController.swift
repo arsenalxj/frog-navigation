@@ -44,7 +44,7 @@ final class FinderJumpController: ObservableObject {
         hotKey.onFailure = { [weak self] in
             guard let self, self.started, self.enabled else { return }
             self.hotKey.stop(); self.shortcutAvailable = false
-            self.error = "⌃G 监听已暂停，请检查键盘监听权限后重试。目录入口仍可点击。"
+            self.error = "⌃G 监听已暂停，请检查键盘监听权限后重试（浮条仍可点击）"
             self.refresh(retryHotKey: false)
         }
     }

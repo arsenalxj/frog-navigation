@@ -132,7 +132,7 @@ final class BookmarkStoreTests: XCTestCase {
             XCTFail("编码超过 32 MB 的数据必须在覆盖主文件前拒绝")
             return
         } catch {
-            XCTAssertEqual(error as? BookmarkError, .invalidData("书签数据超过 32 MB，无法保存。请减少数据量后重试；原文件保持不变。"))
+            XCTAssertEqual(error as? BookmarkError, .invalidData("书签数据超过 32 MB，无法保存；原文件已保留"))
         }
         XCTAssertEqual(try Data(contentsOf: file(scratch)), originalBytes)
         XCTAssertTrue(store.document == initial, "超限保存失败后已加载数据应保持不变")

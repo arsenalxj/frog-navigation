@@ -25,9 +25,9 @@ public actor CustomCommandStore {
         if let bytes {
             let document: Document
             do { document = try JSONDecoder().decode(Document.self, from: bytes) }
-            catch { throw CustomCommandError.invalidData("自定义命令 JSON 无法解析，已保留原文件；请检查 commands-macos.json 的格式。") }
+            catch { throw CustomCommandError.invalidData("命令配置格式损坏，原文件已保留") }
             guard document.schemaVersion == 1 else {
-                throw CustomCommandError.invalidData("自定义命令文件版本不受支持，已保留原文件并暂停写入。")
+                throw CustomCommandError.invalidData("命令配置版本不受支持，原文件已保留")
             }
             commands = try validated(document.commands, reservedNames: reservedNames)
         } else {
@@ -40,14 +40,14 @@ public actor CustomCommandStore {
 
     public func save(_ commands: [CustomCommand], reservedNames: Set<String>) throws {
         guard loaded else {
-            throw CustomCommandError.unavailable("自定义命令尚未成功载入或文件已发生变化，请先重新读取。")
+            throw CustomCommandError.unavailable("命令配置尚未载入，请先执行 :retry")
         }
         let normalized = try validated(commands, reservedNames: reservedNames)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(Document(commands: normalized))
         guard bytes.count <= sizeLimit else {
-            throw CustomCommandError.invalidData("自定义命令数据超过 32 MB，原文件保持不变。")
+            throw CustomCommandError.invalidData("命令配置超过 32 MB，原文件已保留")
         }
         do {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -64,7 +64,7 @@ public actor CustomCommandStore {
         return try commands.map { command in
             let command = try command.validated(reservedNames: reservedNames)
             guard names.insert(command.name).inserted else {
-                throw CustomCommandError.invalidData("命令名 \(command.name) 重复，请换一个名称。")
+                throw CustomCommandError.invalidData("命令名“\(command.name)”重复")
             }
             return command
         }
@@ -80,7 +80,7 @@ public actor CustomCommandStore {
             if isMissing(coordinatorError) { return nil }
             throw coordinatorError
         }
-        guard let result else { throw CustomCommandError.unavailable("无法读取自定义命令文件，请检查文件权限。") }
+        guard let result else { throw CustomCommandError.unavailable("无法读取命令配置，请检查权限") }
         return try result.get()
     }
 
@@ -88,14 +88,14 @@ public actor CustomCommandStore {
         do {
             let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
             guard values.isRegularFile == true else {
-                throw CustomCommandError.invalidData("自定义命令数据必须是普通 JSON 文件。")
+                throw CustomCommandError.invalidData("命令配置须为普通 JSON 文件")
             }
             guard (values.fileSize ?? 0) <= sizeLimit else {
-                throw CustomCommandError.invalidData("自定义命令文件超过 32 MB，无法读取。")
+                throw CustomCommandError.invalidData("命令配置文件超过 32 MB，无法读取")
             }
             let bytes = try Data(contentsOf: url)
             guard bytes.count <= sizeLimit else {
-                throw CustomCommandError.invalidData("自定义命令文件超过 32 MB，无法读取。")
+                throw CustomCommandError.invalidData("命令配置文件超过 32 MB，无法读取")
             }
             return bytes
         } catch {
@@ -114,7 +114,7 @@ public actor CustomCommandStore {
         let temporary = directory.appendingPathComponent(".frog-commands-\(UUID().uuidString).tmp")
         defer { try? manager.removeItem(at: temporary) }
         guard manager.createFile(atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
-            throw CustomCommandError.unavailable("无法创建自定义命令临时文件，请检查写入权限。")
+            throw CustomCommandError.unavailable("无法创建临时文件，请检查写入权限")
         }
         let handle = try FileHandle(forWritingTo: temporary)
         do { try handle.write(contentsOf: bytes); try handle.synchronize(); try handle.close() }
@@ -128,14 +128,14 @@ public actor CustomCommandStore {
                     throw CustomCommandError.externalChange
                 }
                 guard rename(temporary.path, coordinatedURL.path) == 0 else {
-                    throw CustomCommandError.unavailable("保存自定义命令失败：\(String(cString: strerror(errno)))")
+                    throw CustomCommandError.unavailable("保存失败：\(String(cString: strerror(errno)))")
                 }
                 let directoryFD = Darwin.open(self.directory.path, O_RDONLY)
                 if directoryFD >= 0 { _ = fsync(directoryFD); close(directoryFD) }
             }
         }
         if let coordinatorError { throw coordinatorError }
-        guard let result else { throw CustomCommandError.unavailable("无法完成自定义命令原子保存，请重试读取。") }
+        guard let result else { throw CustomCommandError.unavailable("保存失败，请重试") }
         try result.get()
     }
 }

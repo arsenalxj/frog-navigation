@@ -6,7 +6,7 @@ extension BookmarkDocument {
                                         groupID: String?, newGroupName: String? = nil) throws -> String {
         var next = self
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title.count <= 120 else { throw BookmarkError.invalidData("标题不能为空，且不能超过 120 个字符。") }
+        guard !title.isEmpty, title.count <= 120 else { throw BookmarkError.invalidData("标题不能为空，且不超过 120 字") }
         let url = try BookmarkURL.normalize(url)
         var groupID = groupID
         if let newGroupName { groupID = try next.addGroup(name: newGroupName) }
@@ -14,7 +14,7 @@ extension BookmarkDocument {
         let bookmarkID: String
         if let id {
             guard let index = next.bookmarks.firstIndex(where: { $0.id == id }) else {
-                throw BookmarkError.invalidData("该书签已不存在，请重新选择。")
+                throw BookmarkError.invalidData("该书签已不存在")
             }
             bookmarkID = id
             let previousGroup = next.bookmarks[index].groupId
@@ -44,23 +44,23 @@ extension BookmarkDocument {
     public mutating func renameGroup(id: String, name: String) throws {
         let name = try checkedGroupName(name)
         guard let index = groups.firstIndex(where: { $0.id == id }) else {
-            throw BookmarkError.invalidData("该文件夹已不存在，请重新选择。")
+            throw BookmarkError.invalidData("该文件夹已不存在")
         }
         groups[index].name = name
     }
 
     public mutating func deleteBookmark(id: String) throws {
         guard let item = bookmarks.first(where: { $0.id == id }) else {
-            throw BookmarkError.invalidData("该书签已不存在。")
+            throw BookmarkError.invalidData("该书签已不存在")
         }
         bookmarks.removeAll { $0.id == id }
         normalizeOrder(in: item.groupId)
     }
 
     public mutating func deleteGroup(id: String) throws {
-        guard groups.contains(where: { $0.id == id }) else { throw BookmarkError.invalidData("该文件夹已不存在。") }
+        guard groups.contains(where: { $0.id == id }) else { throw BookmarkError.invalidData("该文件夹已不存在") }
         guard !bookmarks.contains(where: { $0.groupId == id }) else {
-            throw BookmarkError.invalidData("请先移出或删除文件夹内的书签，再删除文件夹。")
+            throw BookmarkError.invalidData("仅可删除空文件夹")
         }
         groups.removeAll { $0.id == id }
         normalizeOrder(in: nil)
@@ -69,7 +69,7 @@ extension BookmarkDocument {
     public mutating func moveBookmark(id: String, to groupID: String?, before targetID: String? = nil) throws {
         try requireGroup(groupID)
         guard let index = bookmarks.firstIndex(where: { $0.id == id }) else {
-            throw BookmarkError.invalidData("该书签已不存在。")
+            throw BookmarkError.invalidData("该书签已不存在")
         }
         guard targetID != id else { return }
         let previousGroup = bookmarks[index].groupId
@@ -77,7 +77,7 @@ extension BookmarkDocument {
         ids.removeAll { $0 == id }
         if let targetID {
             guard let insertion = ids.firstIndex(of: targetID) else {
-                throw BookmarkError.invalidData("拖拽目标已改变，请重试。")
+                throw BookmarkError.invalidData("拖拽目标已变化，请重试")
             }
             ids.insert(id, at: insertion)
         } else { ids.append(id) }
@@ -88,7 +88,7 @@ extension BookmarkDocument {
 
     public mutating func reorderRoot(ids: [String]) throws {
         guard Set(ids).count == ids.count, Set(ids) == Set(rootItems.map(\.id)) else {
-            throw BookmarkError.invalidData("根目录内容已改变，请重试排序。")
+            throw BookmarkError.invalidData("根目录内容已变化，请重试")
         }
         assignOrder(ids: ids, groupID: nil)
     }
@@ -97,7 +97,7 @@ extension BookmarkDocument {
         try requireGroup(id)
         guard Set(bookmarkIDs).count == bookmarkIDs.count,
               Set(bookmarkIDs) == Set(bookmarks(in: id).map(\.id)) else {
-            throw BookmarkError.invalidData("文件夹内容已改变，请重试排序。")
+            throw BookmarkError.invalidData("文件夹内容已变化，请重试")
         }
         assignOrder(ids: bookmarkIDs, groupID: id)
     }
@@ -108,7 +108,7 @@ extension BookmarkDocument {
               let sourceIndex = bookmarks.firstIndex(where: { $0.id == sourceID }),
               let targetIndex = bookmarks.firstIndex(where: { $0.id == targetID }),
               bookmarks[targetIndex].groupId == nil else {
-            throw BookmarkError.invalidData("只能在根目录将两条不同书签组成文件夹。")
+            throw BookmarkError.invalidData("仅可合并根目录下的书签")
         }
         let oldSourceGroup = bookmarks[sourceIndex].groupId
         let group = BookmarkGroup(name: "新建文件夹", order: bookmarks[targetIndex].order)
@@ -126,11 +126,11 @@ extension BookmarkDocument {
 
     private func checkedGroupName(_ value: String) throws -> String {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.count <= 120 else { throw BookmarkError.invalidData("文件夹名称不能为空，且不能超过 120 个字符。") }
+        guard !value.isEmpty, value.count <= 120 else { throw BookmarkError.invalidData("文件夹名称不能为空，且不超过 120 字") }
         return value
     }
     private func requireGroup(_ id: String?) throws {
-        guard id == nil || groups.contains(where: { $0.id == id }) else { throw BookmarkError.invalidData("所选文件夹已不存在。") }
+        guard id == nil || groups.contains(where: { $0.id == id }) else { throw BookmarkError.invalidData("所选文件夹已不存在") }
     }
     private func nextOrder(in groupID: String?) -> Int {
         let orders = groupID == nil ? rootItems.map(\.order) : bookmarks(in: groupID).map(\.order)

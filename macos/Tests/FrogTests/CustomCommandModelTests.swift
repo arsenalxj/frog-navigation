@@ -838,4 +838,82 @@ final class CustomCommandModelTests: XCTestCase {
         let parentChoices = LauncherModel.pathChoices(text: sub.path + "/..", command: "commands-directory", base: root)
         XCTAssertTrue(parentChoices.contains { URL(fileURLWithPath: $0.label).lastPathComponent == "sub" })
     }
+
+    func testCreateCommandEnterAdvancesFieldsWrapsTabAndCommandEnterSavesAnytime() async throws {
+        let model = try await model()
+        model.openCustomCommands()
+        model.beginCustomEdit()
+        XCTAssertTrue(model.isCustomAdding)
+        XCTAssertEqual(model.customField, .name)
+        // Empty name fails validation and stays on .name
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertEqual(model.customField, .name)
+        XCTAssertNotNil(model.prompt?.error)
+        // Valid name advances to .title
+        model.updateInput("gh")
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertEqual(model.customField, .title)
+        XCTAssertNil(model.prompt?.error)
+        // Empty title fails validation on Enter
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertEqual(model.customField, .title)
+        XCTAssertNotNil(model.prompt?.error)
+        // Valid title advances to .type
+        model.updateInput("GitHub 搜索")
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        XCTAssertEqual(model.customField, .type)
+        // Switch type to .url using arrow down and select via option items
+        let urlIndex = try XCTUnwrap(CustomCommandKind.allCases.firstIndex(of: .url))
+        model.selectCustomOption(at: urlIndex)
+        XCTAssertEqual(model.customDraft?.type, .url)
+        XCTAssertEqual(model.customFields, [.name, .title, .type, .target])
+        // Enter on .type advances to .target (last field)
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: false))
+        XCTAssertEqual(model.customField, .target)
+        // Tab on last field wraps back to .name, Shift+Tab wraps back to .target
+        XCTAssertTrue(model.handleKey(try event(48, "\t"), isTextEditing: true))
+        XCTAssertEqual(model.customField, .name)
+        XCTAssertTrue(model.handleKey(try event(48, "\t", .shift), isTextEditing: true))
+        XCTAssertEqual(model.customField, .target)
+        // Enter on last field saves
+        model.updateInput("https://github.com/search?q={query}")
+        XCTAssertTrue(model.handleKey(try event(36, "\r"), isTextEditing: true))
+        try await wait { !model.customSaving }
+        XCTAssertEqual(model.customScreen, .list)
+        XCTAssertEqual(model.customCommands.map(\.name), ["gh"])
+
+        // Command+Enter saves immediately from first field when creating a copy
+        model.duplicateCurrentCommand()
+        XCTAssertTrue(model.isCustomAdding)
+        XCTAssertEqual(model.customField, .name)
+        XCTAssertTrue(model.handleKey(try event(36, "\r", .command), isTextEditing: true))
+        try await wait { !model.customSaving }
+        XCTAssertEqual(model.customScreen, .list)
+        XCTAssertEqual(model.customCommands.map(\.name), ["gh", "gh-copy"])
+    }
+
+    func testOptionFieldsSupportUpDownArrowsAndListSupportsSettingsAndHelp() async throws {
+        let model = try await model()
+        model.openCustomCommands()
+        // List shortcuts: , opens settings, ? opens help
+        XCTAssertTrue(model.handleKey(try event(43, ","), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .settings)
+        model.escape()
+        XCTAssertEqual(model.buffer, .commands)
+        XCTAssertTrue(model.handleKey(try event(44, "?", .shift), isTextEditing: false))
+        XCTAssertEqual(model.buffer, .help)
+        model.escape()
+        XCTAssertEqual(model.buffer, .commands)
+
+        // Option fields respond to Up/Down arrows and expose selectable option items
+        model.beginCustomEdit()
+        model.selectCustomField(try XCTUnwrap(model.customFields.firstIndex(of: .type)))
+        let initialType = try XCTUnwrap(model.customDraft?.type)
+        XCTAssertEqual(model.customOptionItems.count, CustomCommandKind.allCases.count)
+        XCTAssertTrue(model.handleKey(try event(125), isTextEditing: false))
+        XCTAssertNotEqual(model.customDraft?.type, initialType)
+        XCTAssertTrue(model.handleKey(try event(126), isTextEditing: false))
+        XCTAssertEqual(model.customDraft?.type, initialType)
+        model.escapeCustomCommands()
+    }
 }

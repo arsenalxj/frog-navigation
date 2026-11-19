@@ -13,6 +13,15 @@ enum FinderJumpPermission: String, CaseIterable {
         case .listenEvents: return "允许键盘监听"
         }
     }
+
+    var shortTitle: String {
+        switch self {
+        case .accessibility: return "辅助功能"
+        case .finderAutomation: return "Finder 自动化"
+        case .postEvents: return "键盘控制"
+        case .listenEvents: return "键盘监听"
+        }
+    }
 }
 
 struct FinderJumpPermissionState: Equatable {
@@ -53,9 +62,9 @@ final class NativeFinderJumpPermissions: FinderJumpPermissionChecking {
         state.accessibility = AXIsProcessTrusted()
         state.finderAutomation = status == noErr
         if status == errAETimeout {
-            state.finderAutomationError = "检查 Finder 授权超时，请确认 Finder 已打开；仍未恢复时重启青蛙导航。"
+            state.finderAutomationError = "检查 Finder 授权超时，请确认 Finder 已打开或重启应用"
         } else if ![noErr, OSStatus(errAEEventNotPermitted), OSStatus(errAEEventWouldRequireUserConsent)].contains(status) {
-            state.finderAutomationError = "暂时无法检查 Finder 授权，请打开 Finder 后重试。"
+            state.finderAutomationError = "无法检查 Finder 授权，请打开 Finder 后重试"
         }
         return state
     }

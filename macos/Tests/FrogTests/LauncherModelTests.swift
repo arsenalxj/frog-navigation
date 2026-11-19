@@ -25,7 +25,9 @@ final class LauncherModelTests: XCTestCase {
         try document.encoded().write(to: directory.appendingPathComponent("bookmarks.json"))
         let store = BookmarkStore(directoryOverride: directory, persistDirectory: false)
         await store.load()
-        return LauncherModel(store: store, isolated: true)
+        let model = LauncherModel(store: store, isolated: true)
+        model.readClipboardString = { nil }
+        return model
     }
 
     private func fixture(count: Int) -> BookmarkDocument {
@@ -129,15 +131,13 @@ final class LauncherModelTests: XCTestCase {
         let original = try saved(model)
         addThroughTitle(model, title: "未提交标题")
         try choose("__new__", in: model)
-        model.switchPromptField(1)
-        model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         model.updateInput("未提交文件夹")
         XCTAssertTrue(model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true))
         XCTAssertEqual(model.prompt?.field, "location")
-        XCTAssertEqual(model.prompt?.choicesFocused, true)
         model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         XCTAssertEqual(model.inputText, "未提交文件夹")
-        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         XCTAssertEqual(model.inputText, "未提交标题")
@@ -152,8 +152,7 @@ final class LauncherModelTests: XCTestCase {
         let model = try await makeModel()
         addThroughTitle(model)
         try choose("__new__", in: model)
-        model.switchPromptField(1)
-        model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         XCTAssertTrue(model.document.groups.isEmpty)
         model.updateInput("新工作目录")
         model.submitInput()
@@ -200,11 +199,11 @@ final class LauncherModelTests: XCTestCase {
         model.updateInput("新的标题")
         XCTAssertEqual(model.inputRevision, revision)
         XCTAssertFalse(model.handleKey(try key(51, "\u{7f}"), isTextEditing: true))
-        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
         XCTAssertEqual(model.prompt?.field, "url")
         XCTAssertGreaterThan(model.inputRevision, revision)
         model.updateInput("changed.example/path")
-        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
         XCTAssertEqual(model.inputText, "新的标题")
         XCTAssertEqual(try saved(model), document)
         model.submitInput()
@@ -219,7 +218,7 @@ final class LauncherModelTests: XCTestCase {
         try select(document.bookmarks[0].id, in: model)
         model.runCommand("edit")
         model.updateInput("")
-        _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
+        _ = model.handleKey(try key(48, "\t"), isTextEditing: true)
         model.updateInput("new.example")
         model.submitInput()
         XCTAssertEqual(model.prompt?.field, "title")
@@ -261,20 +260,19 @@ final class LauncherModelTests: XCTestCase {
         try select(document.bookmarks[0].id, in: model)
         model.runCommand("move")
         try choose("__new__", in: model)
-        model.switchPromptField(1)
-        model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         model.updateInput("新归属")
         _ = model.handleKey(try key(48, "\t", modifiers: .shift), isTextEditing: true)
-        XCTAssertEqual(model.prompt?.choicesFocused, true)
+        XCTAssertEqual(model.prompt?.field, "to")
         model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         XCTAssertEqual(model.inputText, "新归属")
         XCTAssertEqual(try saved(model), document)
         model.escape()
         XCTAssertTrue(model.document.groups.isEmpty)
         model.runCommand("move")
         try choose("__new__", in: model)
-        model.switchPromptField(1)
-        model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         model.updateInput("最终归属")
         model.submitInput()
         try await settle { !model.busy }
@@ -289,8 +287,7 @@ final class LauncherModelTests: XCTestCase {
         try select(document.bookmarks[0].id, in: model)
         model.runCommand("move")
         try choose("__new__", in: model)
-        model.switchPromptField(1)
-        model.switchPromptField(1)
+        XCTAssertEqual(model.prompt?.field, "folder")
         model.updateInput("不能成为空壳")
         try await model.store.apply { try $0.deleteBookmark(id: document.bookmarks[0].id) }
         try await settle { !model.busy }
@@ -768,10 +765,10 @@ final class LauncherModelTests: XCTestCase {
         XCTAssertEqual(model.settingsRows.first { $0.key == "groups" }?.value, "0")
         XCTAssertEqual(model.settingsRows.first { $0.key == "schema" }?.value, "frog-bookmarks v1")
         model.runCommand("unknown-command")
-        XCTAssertEqual(model.settingsRows.first { $0.key == "log" }?.value, "\(model.logs.count) lines")
+        XCTAssertEqual(model.settingsRows.first { $0.key == "log" }?.value, "\(model.logs.count) 条")
         model.runCommand("clear")
         XCTAssertTrue(model.logs.isEmpty)
-        XCTAssertEqual(model.settingsRows.first { $0.key == "log" }?.value, "0 lines")
+        XCTAssertEqual(model.settingsRows.first { $0.key == "log" }?.value, "0 条")
     }
 
     func testSettingsHaveNoSingleLetterActionsAndSeparateDataFromOperations() async throws {
@@ -1064,11 +1061,11 @@ final class LauncherModelTests: XCTestCase {
         let model = try await makeModel()
         model.runCommand("calc")
         model.runCommand("calc foo")
-        XCTAssertEqual(model.calcFeedback, "✗ 用法：:calc 打开计算器，:calc clear 清空。")
+        XCTAssertEqual(model.calcFeedback, "✗ 用法：:calc 打开，:calc clear 清空")
         model.updateInput("1+1")
         model.submitCalc()
         model.runCommand("calc clear")
-        XCTAssertEqual(model.calcFeedback, "✓ 计算器已清空")
+        XCTAssertEqual(model.calcFeedback, "✓ 已清空")
         XCTAssertEqual(model.buffer, .calc)
         XCTAssertEqual(model.inputKind, .calc)
         XCTAssertEqual(model.inputText, "")
@@ -1105,6 +1102,50 @@ final class LauncherModelTests: XCTestCase {
         model.submitInput()
         XCTAssertEqual(model.buffer, .help)
         XCTAssertNil(model.inputKind)
+    }
+
+    func testCalculatorCommandDeleteClearsAllAndShiftDDeletesSingleHistoryEntry() async throws {
+        let model = try await makeModel()
+        model.runCommand("calc")
+        model.updateInput("2+2")
+        model.submitCalc()
+        model.updateInput("3*5")
+        model.submitCalc()
+        XCTAssertEqual(model.calcHistory.map(\.value), ["15", "4"])
+
+        // Shift+D in history focus deletes only selected entry
+        model.selectCalcEntry(at: 0)
+        XCTAssertTrue(model.handleKey(try key(2, "D", modifiers: .shift), isTextEditing: false))
+        XCTAssertEqual(model.calcHistory.map(\.value), ["4"])
+        XCTAssertTrue(model.calcHistoryFocused)
+        XCTAssertEqual(model.calcHistoryIndex, 0)
+        XCTAssertEqual(model.calcFeedback, "✓ 已删除记录")
+
+        // Deleting last history entry returns focus to input
+        XCTAssertTrue(model.handleKey(try key(2, "D", modifiers: .shift), isTextEditing: false))
+        XCTAssertTrue(model.calcHistory.isEmpty)
+        XCTAssertFalse(model.calcHistoryFocused)
+        XCTAssertEqual(model.inputKind, .calc)
+
+        // Command+Delete clears expression and history from input focus
+        model.updateInput("9*9")
+        model.submitCalc()
+        XCTAssertEqual(model.calcHistory.count, 1)
+        XCTAssertTrue(model.handleKey(try key(51, "\u{7f}", modifiers: .command), isTextEditing: true))
+        XCTAssertEqual(model.calcExpression, "")
+        XCTAssertEqual(model.inputText, "")
+        XCTAssertTrue(model.calcHistory.isEmpty)
+        XCTAssertEqual(model.calcFeedback, "✓ 已清空")
+
+        // Command+Delete also works from history focus
+        model.updateInput("6+7")
+        model.submitCalc()
+        model.selectCalcEntry(at: 0)
+        XCTAssertTrue(model.handleKey(try key(51, "\u{7f}", modifiers: .command), isTextEditing: false))
+        XCTAssertEqual(model.calcExpression, "")
+        XCTAssertTrue(model.calcHistory.isEmpty)
+        XCTAssertFalse(model.calcHistoryFocused)
+        XCTAssertEqual(model.inputKind, .calc)
     }
 
     func testImportEdgeCommandMergesDeduplicatesAndPreservesDataOnFailure() async throws {

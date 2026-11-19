@@ -23,7 +23,7 @@ final class LoginItemController: ObservableObject {
 
     func setEnabled(_ value: Bool) {
         guard !isolated else {
-            error = "隔离运行不修改系统登录项，请在正式安装的应用中设置。"
+            error = "隔离模式不可修改系统登录项"
             return
         }
         guard !changing else { return }
@@ -34,7 +34,7 @@ final class LoginItemController: ObservableObject {
                 if value { try SMAppService.mainApp.register() }
                 else { try await SMAppService.mainApp.unregister() }
             } catch {
-                self.error = "系统未能\(value ? "启用" : "停用")登录启动：\(error.localizedDescription)。请将青蛙导航安装到“应用程序”后重试，或在系统登录项中手动设置。"
+                self.error = "无法\(value ? "启用" : "停用")登录启动：\(error.localizedDescription)"
             }
             refresh()
             changing = false
@@ -43,7 +43,7 @@ final class LoginItemController: ObservableObject {
 
     func openSettings() {
         guard !isolated else {
-            error = "隔离运行不打开系统登录项设置。"
+            error = "隔离模式不可打开系统登录项设置"
             return
         }
         SMAppService.openSystemSettingsLoginItems()

@@ -38,10 +38,41 @@ struct TerminalPrompt: Equatable {
     var choicesFocused: Bool = false
     var acceptsText: Bool = true
     var keyboardHint: String {
-        choicesFocused ? "↑↓ 选择 · Enter 采纳并回到字段 · Tab/Shift+Tab 切换焦点 · ⌘Enter 提交已采纳值 · Esc 回到字段" : hint
+        choicesFocused ? "↑↓ 选择 · Enter 采纳 · Esc 返回输入" : hint
+    }
+    var commandTitle: String {
+        switch command {
+        case "add": return "添加"
+        case "edit": return "编辑"
+        case "rename": return "重命名"
+        case "mkdir": return "新建文件夹"
+        case "move": return "移动"
+        case "delete": return "删除"
+        case "hotkey": return "快捷键"
+        case "backup": return "导出备份"
+        case "restore": return "恢复备份"
+        case "cd": return "数据目录"
+        case "commands-edit": return "命令"
+        case "commands-delete": return "删除"
+        default: return command
+        }
+    }
+    var fieldTitle: String {
+        switch field {
+        case "url": return "网址"
+        case "title": return "标题"
+        case "location", "to": return "位置"
+        case "folder": return "新文件夹"
+        case "name": return command == "rename" ? "新名称" : "名称"
+        case "path": return "路径"
+        case "file": return "文件"
+        case "confirm": return "确认"
+        case "press keys": return "按下组合键"
+        default: return field
+        }
     }
     var label: String {
-        "\(command)\(total > 0 ? " \(step + 1)/\(total)" : "") › \(field)"
+        "\(commandTitle)\(total > 1 ? " \(step + 1)/\(total)" : "") › \(fieldTitle)"
     }
 }
 

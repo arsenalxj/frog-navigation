@@ -5,14 +5,14 @@ enum FinderJumpNavigationError: LocalizedError {
     case unavailable, changedFocus, accessibilityBusy, missingDirectory, unsupportedPanel, timedOut, cannotWritePath, unverifiedDirectory
     var errorDescription: String? {
         switch self {
-        case .unavailable: return "当前没有可跳转的文件窗口或 Finder 目录。"
-        case .changedFocus: return "文件窗口或焦点已变化，已停止目录跳转。"
-        case .accessibilityBusy: return "文件窗口暂时无法读取，请重试。"
-        case .missingDirectory: return "Finder 目录已不可用。"
-        case .unsupportedPanel: return "当前文件窗口没有可安全操作的“前往文件夹”入口。"
-        case .timedOut: return "文件窗口未及时响应，已停止目录跳转。"
-        case .cannotWritePath: return "无法向“前往文件夹”填写目录路径。"
-        case .unverifiedDirectory: return "已执行目录跳转，但当前应用未提供足够信息确认目录位置。"
+        case .unavailable: return "无可用文件窗口或 Finder 目录"
+        case .changedFocus: return "窗口或焦点已变化，已取消跳转"
+        case .accessibilityBusy: return "文件窗口暂不可读，请重试"
+        case .missingDirectory: return "Finder 目录已不可用"
+        case .unsupportedPanel: return "当前窗口不支持前往文件夹"
+        case .timedOut: return "文件窗口响应超时，已取消跳转"
+        case .cannotWritePath: return "无法填入目标路径"
+        case .unverifiedDirectory: return "已尝试跳转，但无法确认当前目录"
         }
     }
 }

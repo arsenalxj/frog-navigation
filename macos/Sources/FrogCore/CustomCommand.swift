@@ -35,7 +35,7 @@ public enum CustomCommandError: Error, LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .invalidData(let message), .unavailable(let message): message
-        case .externalChange: "自定义命令文件已被外部修改，未覆盖原文件。请重新读取后再保存。"
+        case .externalChange: "命令配置已被外部修改，请执行 :retry 重新读取"
         }
     }
 }
@@ -64,7 +64,7 @@ public struct CustomCommand: Codable, Equatable, Identifiable, Sendable {
 
     public func validated(reservedNames: Set<String>) throws -> CustomCommand {
         guard ![name, title, directory, target, arguments].contains(where: { $0.contains("\0") }) else {
-            throw CustomCommandError.invalidData("自定义命令字段不能包含 NUL 字符。")
+            throw CustomCommandError.invalidData("字段不能包含空字符")
         }
         var result = self
         result.name = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -73,13 +73,13 @@ public struct CustomCommand: Codable, Equatable, Identifiable, Sendable {
         result.target = target.trimmingCharacters(in: .whitespacesAndNewlines)
         result.arguments = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
         guard result.name.range(of: "^[a-z][a-z0-9_-]*$", options: .regularExpression) != nil else {
-            throw CustomCommandError.invalidData("命令名须以字母开头，仅含字母、数字、短横线或下划线。")
+            throw CustomCommandError.invalidData("命令名须以字母开头，仅含字母、数字、- 或 _")
         }
         guard !reservedNames.contains(where: { $0.lowercased() == result.name }) else {
-            throw CustomCommandError.invalidData("该名称由内置命令保留，请换一个名称。")
+            throw CustomCommandError.invalidData("该名称与内置命令冲突")
         }
         guard !result.title.isEmpty, type == .directory || !result.target.isEmpty else {
-            throw CustomCommandError.invalidData(type == .directory ? "名称不能为空。" : "名称与执行内容不能为空。")
+            throw CustomCommandError.invalidData(type == .directory ? "名称不能为空" : "名称与执行内容不能为空")
         }
         if type == .directory {
             result.target = ""
@@ -87,19 +87,19 @@ public struct CustomCommand: Codable, Equatable, Identifiable, Sendable {
         }
         if type != .url {
             guard result.directory.hasPrefix("/") || result.directory.hasPrefix("~/") else {
-                throw CustomCommandError.invalidData("工作目录请填写绝对路径或 ~/ 开头的路径。")
+                throw CustomCommandError.invalidData("工作目录须为绝对路径或 ~/ 开头")
             }
         }
         if type == .program {
             guard result.target.hasPrefix("/") || result.target.hasPrefix("~/") else {
-                throw CustomCommandError.invalidData("程序或脚本请填写绝对路径或 ~/ 开头的路径。")
+                throw CustomCommandError.invalidData("程序路径须为绝对路径或 ~/ 开头")
             }
         }
         if (type == .terminal || type == .directory) && terminal == .none {
-            throw CustomCommandError.invalidData("终端命令必须选择可用的终端应用。")
+            throw CustomCommandError.invalidData("请选择可用的终端应用")
         }
         if terminal == .finder && type != .directory {
-            throw CustomCommandError.invalidData("Finder 仅用于打开目录。")
+            throw CustomCommandError.invalidData("Finder 仅用于打开目录")
         }
         if type == .url {
             let template = result.target.replacingOccurrences(of: "{query}", with: "query")
@@ -107,7 +107,7 @@ public struct CustomCommand: Codable, Equatable, Identifiable, Sendable {
                   let url = URLComponents(string: template),
                   ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
                   let host = url.host, !host.isEmpty, url.url != nil else {
-                throw CustomCommandError.invalidData("网址模板必须是有效的 http 或 https 地址，可使用 {query}。")
+                throw CustomCommandError.invalidData("网址须为有效的 http 或 https 模板（支持 {query}）")
             }
         }
         return result

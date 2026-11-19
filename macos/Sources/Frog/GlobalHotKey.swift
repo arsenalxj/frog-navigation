@@ -28,9 +28,9 @@ struct HotKeyShortcut: Codable, Equatable {
 
     var inputValidationError: String? {
         guard keyCode <= 127, ![54, 55, 56, 57, 58, 59, 60, 61, 62, 63].contains(keyCode),
-              modifiers & ~Self.modifierMask == 0 else { return "请选择普通按键与修饰键的组合。" }
+              modifiers & ~Self.modifierMask == 0 else { return "请按下普通键与修饰键组合" }
         guard modifiers & UInt32(cmdKey | optionKey | controlKey) != 0 else {
-            return "请至少搭配 ⌘、⌥ 或 ⌃ 中的一个键。"
+            return "至少需要搭配 ⌘、⌥ 或 ⌃"
         }
         return nil
     }
@@ -44,9 +44,9 @@ struct HotKeyShortcut: Codable, Equatable {
         let characters = layout?.characters(keyCode: keyCode, modifiers: modifiers)
         if LauncherKeyboardCommand.match(keyCode: keyCode, modifiers: modifiers, characters: characters) != nil ||
             menuShortcuts.contains(where: { $0.matches(characters: characters ?? "", modifiers: modifiers) }) {
-            return "此组合用于青蛙导航的现有命令，请更换快捷键。"
+            return "与现有命令冲突，请更换快捷键"
         }
-        if characters == nil { return "暂时无法读取此按键的键盘布局，请重试或更换组合。" }
+        if characters == nil { return "无法读取当前键盘布局，请重试" }
         return nil
     }
 
@@ -79,9 +79,9 @@ enum HotKeyRegistrationError: LocalizedError {
     case systemConflict, occupied, system(OSStatus)
     var errorDescription: String? {
         switch self {
-        case .systemConflict: return "此组合已用于系统快捷键，请更换组合或先在系统设置中调整。"
-        case .occupied: return "此组合已被系统或其他应用占用，请更换快捷键。"
-        case .system(let status): return "系统未能注册快捷键（\(status)），请重试或更换组合。"
+        case .systemConflict: return "与系统快捷键冲突，请更换组合"
+        case .occupied: return "快捷键已被其他应用占用，请更换组合"
+        case .system(let status): return "无法注册快捷键（\(status)）"
         }
     }
 }
@@ -224,8 +224,8 @@ final class GlobalHotKeyController: ObservableObject {
             suppressUntilRelease = false
             let failure = error.localizedDescription
             if started && previous.enabled {
-                do { try register(previous.shortcut); self.error = failure + " 已保留原快捷键。" }
-                catch { self.error = failure + " 原快捷键也未能恢复，请重新设置。" }
+                do { try register(previous.shortcut); self.error = failure + "，已保留原快捷键" }
+                catch { self.error = failure + "，原快捷键也未能恢复" }
             } else { self.error = failure }
         }
     }

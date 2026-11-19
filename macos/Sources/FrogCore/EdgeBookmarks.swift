@@ -46,7 +46,7 @@ public enum EdgeBookmarks {
         let manager = FileManager.default
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
-            throw BookmarkError.unavailable("未找到 Edge 数据目录：\(root.path)。请确认已安装 Microsoft Edge。")
+            throw BookmarkError.unavailable("未找到 Edge 数据目录：\(root.path)")
         }
 
         var sources: [(file: URL, profile: String?)] = []
@@ -76,7 +76,7 @@ public enum EdgeBookmarks {
         }
 
         guard !sources.isEmpty else {
-            throw BookmarkError.unavailable("Edge 数据目录里没有找到 Bookmarks 文件：\(root.path)")
+            throw BookmarkError.unavailable("未在 Edge 目录中找到 Bookmarks 文件：\(root.path)")
         }
 
         var folders: [EdgeFolder] = []
@@ -85,7 +85,7 @@ public enum EdgeBookmarks {
         for source in sources {
             let values = try source.file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
             guard values.isRegularFile == true else {
-                throw BookmarkError.invalidData("Edge 书签数据必须是普通文件：\(source.file.path)")
+                throw BookmarkError.invalidData("Edge 书签须为普通文件：\(source.file.path)")
             }
             guard (values.fileSize ?? 0) <= maximumBytes else {
                 throw BookmarkError.invalidData("Edge 书签文件超过 32 MB：\(source.file.path)")
@@ -105,18 +105,18 @@ public enum EdgeBookmarks {
 
     public static func parse(data: Data, label: String? = nil) throws -> EdgeImportPayload {
         guard data.count <= maximumBytes else {
-            throw BookmarkError.invalidData("Edge 书签文件超过 32 MB，无法导入。")
+            throw BookmarkError.invalidData("Edge 书签文件超过 32 MB，无法导入")
         }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let roots = object["roots"] as? [String: Any] else {
-            throw BookmarkError.invalidData("无法识别 Edge 书签文件结构，文件可能已损坏。")
+            throw BookmarkError.invalidData("无法识别 Edge 书签文件结构")
         }
 
         var accumulator = Accumulator()
         for (key, fallback) in [("bookmark_bar", "收藏夹栏"), ("other", "其他收藏夹")] {
             guard let value = roots[key] else { continue }
             guard let root = value as? [String: Any], root["type"] as? String == "folder" else {
-                throw BookmarkError.invalidData("Edge 收藏夹根节点无效，未导入任何内容。")
+                throw BookmarkError.invalidData("Edge 收藏夹根节点无效")
             }
             let name = cleaned(root["name"] as? String) ?? fallback
             var rawPath = [name]
@@ -125,14 +125,14 @@ public enum EdgeBookmarks {
         }
 
         guard !accumulator.folders.isEmpty else {
-            throw BookmarkError.invalidData("Edge 文件缺少收藏夹栏和其他收藏夹，无法导入。")
+            throw BookmarkError.invalidData("Edge 文件缺少收藏夹数据")
         }
         return EdgeImportPayload(folders: accumulator.folders, profiles: 1, unsupported: accumulator.unsupported)
     }
 
     private static func walk(children: Any?, rawPath: [String], into accumulator: inout Accumulator) throws {
         guard let rows = children as? [[String: Any]] else {
-            throw BookmarkError.invalidData("Edge 文件夹内容损坏，未导入任何内容。")
+            throw BookmarkError.invalidData("Edge 文件夹数据损坏")
         }
         let folderName = limited(rawPath.joined(separator: " / "))
         accumulator.ensure(folderName)
@@ -143,7 +143,7 @@ public enum EdgeBookmarks {
                 continue
             }
             guard row["type"] as? String == "url", let rawURL = row["url"] as? String else {
-                throw BookmarkError.invalidData("Edge 书签节点无效，未导入任何内容。")
+                throw BookmarkError.invalidData("Edge 书签数据无效")
             }
             let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard BookmarkURL.isValid(url) else {

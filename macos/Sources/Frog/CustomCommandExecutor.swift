@@ -75,16 +75,16 @@ final class CustomCommandExecutor {
         if command.type == .url {
             let destination = try Self.url(template: command.target, input: input)
             guard NSWorkspace.shared.open(destination) else {
-                throw CustomCommandExecutionError.invalid("无法打开网址，请检查默认浏览器设置。")
+                throw CustomCommandExecutionError.invalid("无法打开网址，请检查默认浏览器")
             }
-            return CustomCommandExecutionResult(summary: "已交给默认浏览器；未确认网页加载结果。", output: destination.absoluteString, exitCode: nil)
+            return CustomCommandExecutionResult(summary: "已交由浏览器打开", output: destination.absoluteString, exitCode: nil)
         }
 
         let directory = try Self.directoryURL(command.directory)
         let arguments = try Self.arguments(template: command.arguments, input: input)
         if command.terminal == .finder {
             guard let finder = Self.applicationURL(for: .finder) else {
-                throw CustomCommandExecutionError.invalid("未找到 Finder，无法打开目录。")
+                throw CustomCommandExecutionError.invalid("未找到 Finder")
             }
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
@@ -92,11 +92,11 @@ final class CustomCommandExecutor {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 NSWorkspace.shared.open([directory], withApplicationAt: finder, configuration: configuration) { application, error in
                     if let error { continuation.resume(throwing: error) }
-                    else if application == nil { continuation.resume(throwing: CustomCommandExecutionError.invalid("Finder 未返回已启动的应用。")) }
+                    else if application == nil { continuation.resume(throwing: CustomCommandExecutionError.invalid("无法启动 Finder")) }
                     else { continuation.resume() }
                 }
             }
-            return CustomCommandExecutionResult(summary: "已交给 Finder 打开目录。", output: directory.path, exitCode: nil)
+            return CustomCommandExecutionResult(summary: "已交由 Finder 打开", output: directory.path, exitCode: nil)
         }
         if command.type == .program && command.terminal == .none {
             let executable = try Self.executableURL(command.target)
@@ -108,10 +108,10 @@ final class CustomCommandExecutor {
         }
 
         guard command.terminal != .none else {
-            throw CustomCommandExecutionError.invalid("终端命令必须选择可用的终端应用。")
+            throw CustomCommandExecutionError.invalid("请选择可用的终端应用")
         }
         guard let application = Self.applicationURL(for: command.terminal) else {
-            throw CustomCommandExecutionError.invalid("未找到 \(command.terminal.label)，请先安装或改选其他终端。")
+            throw CustomCommandExecutionError.invalid("未找到 \(command.terminal.label)")
         }
         let script = try prepareTerminalScript(command, input: input)
         var fallbackNote = ""
@@ -120,10 +120,10 @@ final class CustomCommandExecutor {
                .filter({ !$0.isTerminated }).isEmpty {
             do {
                 let target = try openGhosttyTab(script: script, directory: directory)
-                return CustomCommandExecutionResult(summary: "已在 Ghostty 现有\(target)中打开；实际执行结果请查看终端。",
+                return CustomCommandExecutionResult(summary: "已在 Ghostty \(target)中打开",
                                                     output: "", exitCode: nil)
             } catch {
-                fallbackNote = "；控制 Ghostty 失败，已改为新窗口（\(error.localizedDescription)）"
+                fallbackNote = "（\(error.localizedDescription)，已改用新窗口）"
             }
         }
         do {
@@ -135,7 +135,7 @@ final class CustomCommandExecutor {
                     if let error {
                         continuation.resume(throwing: error)
                     } else if application == nil {
-                        continuation.resume(throwing: CustomCommandExecutionError.invalid("终端未返回已启动的应用。"))
+                        continuation.resume(throwing: CustomCommandExecutionError.invalid("无法启动终端"))
                     } else {
                         continuation.resume()
                     }
@@ -152,9 +152,9 @@ final class CustomCommandExecutor {
             }
         } catch {
             try? FileManager.default.removeItem(at: script.deletingLastPathComponent())
-            throw CustomCommandExecutionError.invalid("无法将命令交给 \(command.terminal.label)：\(error.localizedDescription) 请检查终端安装与启动权限。")
+            throw CustomCommandExecutionError.invalid("无法交由 \(command.terminal.label) 打开：\(error.localizedDescription)")
         }
-        return CustomCommandExecutionResult(summary: "已交给 \(command.terminal.label)\(fallbackNote)；实际执行结果请查看终端。", output: "", exitCode: nil)
+        return CustomCommandExecutionResult(summary: "已交由 \(command.terminal.label) 打开\(fallbackNote)", output: "", exitCode: nil)
     }
 
     /// 通过 Ghostty 脚本接口在现有窗口新建标签页；失败时由调用方回退到新实例。
@@ -181,11 +181,11 @@ final class CustomCommandExecutor {
             let message: String
             switch number {
             case -1743:
-                message = "未授权控制 Ghostty；可在系统设置 › 隐私与安全性 › 自动化中允许"
+                message = "未授权自动化控制 Ghostty"
             case -1708, -2740, -2741:
                 message = "Ghostty 未启用脚本支持（macos-applescript）"
             default:
-                message = error[NSAppleScript.errorMessage] as? String ?? "未知脚本错误"
+                message = error[NSAppleScript.errorMessage] as? String ?? "脚本执行失败"
             }
             throw CustomCommandExecutionError.invalid(message)
         }
@@ -202,7 +202,7 @@ final class CustomCommandExecutor {
     func prepareTerminalScript(_ command: CustomCommand, input: String) throws -> URL {
         let command = try command.validated(reservedNames: [])
         guard command.type != .url, command.terminal != .none, command.terminal != .finder else {
-            throw CustomCommandExecutionError.invalid("请选择使用终端应用的命令。")
+            throw CustomCommandExecutionError.invalid("请选择使用终端的命令")
         }
         let directory = try Self.directoryURL(command.directory)
         let arguments = try Self.arguments(template: command.arguments, input: input)
@@ -227,11 +227,11 @@ final class CustomCommandExecutor {
                 """ + "\n"
             }
             guard FileManager.default.createFile(atPath: script.path, contents: Data(content.utf8), attributes: [.posixPermissions: 0o700]) else {
-                throw CustomCommandExecutionError.invalid("无法写入终端启动脚本。")
+                throw CustomCommandExecutionError.invalid("无法写入启动脚本")
             }
         } catch {
             try? FileManager.default.removeItem(at: temporaryDirectory)
-            throw CustomCommandExecutionError.invalid("无法准备终端命令：\(error.localizedDescription) 请检查临时目录权限与磁盘空间。")
+            throw CustomCommandExecutionError.invalid("无法准备终端脚本：\(error.localizedDescription)")
         }
         return script
     }
@@ -285,7 +285,7 @@ final class CustomCommandExecutor {
 
     nonisolated static func arguments(template: String, input: String) throws -> [String] {
         guard !template.contains("\0"), !input.contains("\0") else {
-            throw CustomCommandExecutionError.invalid("参数不能包含空字符。")
+            throw CustomCommandExecutionError.invalid("参数不能包含空字符")
         }
         var words: [String] = []
         var word = ""
@@ -320,11 +320,11 @@ final class CustomCommandExecutor {
             }
         }
         guard quote == nil, !escaped else {
-            throw CustomCommandExecutionError.invalid("参数模板的引号或反斜杠未闭合，请检查单引号、双引号与转义。")
+            throw CustomCommandExecutionError.invalid("参数模板中的引号或转义未闭合")
         }
         if started { words.append(word) }
         guard input.isEmpty || words.contains(where: { $0.contains("{args}") }) else {
-            throw CustomCommandExecutionError.invalid("此命令不接收输入；请在参数模板中添加 {args}，或移除命令后的输入。")
+            throw CustomCommandExecutionError.invalid("此命令不接收参数（模板缺少 {args}）")
         }
         // Substitute only after tokenization: runtime text is one literal argument, never shell syntax.
         return words.map { $0.replacingOccurrences(of: "{args}", with: input) }
@@ -333,17 +333,17 @@ final class CustomCommandExecutor {
     nonisolated static func url(template: String, input: String) throws -> URL {
         let hasQuery = template.contains("{query}")
         guard !hasQuery || !input.isEmpty else {
-            throw CustomCommandExecutionError.invalid("此网址需要查询内容，请在命令后输入搜索词。")
+            throw CustomCommandExecutionError.invalid("请在命令后输入查询内容")
         }
         guard hasQuery || input.isEmpty else {
-            throw CustomCommandExecutionError.invalid("此网址不接收输入；请在网址模板中添加 {query}，或移除命令后的输入。")
+            throw CustomCommandExecutionError.invalid("此网址不接收参数（模板缺少 {query}）")
         }
         let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         guard let encoded = input.addingPercentEncoding(withAllowedCharacters: unreserved),
               let destination = URL(string: template.replacingOccurrences(of: "{query}", with: encoded)),
               let scheme = destination.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = destination.host, !host.isEmpty else {
-            throw CustomCommandExecutionError.invalid("网址必须是有效的 http:// 或 https:// 地址，请检查网址模板。")
+            throw CustomCommandExecutionError.invalid("网址须为有效的 http:// 或 https:// 地址")
         }
         return destination
     }
@@ -357,7 +357,7 @@ final class CustomCommandExecutor {
         var isDirectory: ObjCBool = false
         guard expanded.hasPrefix("/"), !expanded.contains("\0"),
               FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw CustomCommandExecutionError.invalid("工作目录不存在或不是文件夹：\(path)。请在编辑命令中选择有效目录。")
+            throw CustomCommandExecutionError.invalid("工作目录不存在或不是文件夹：\(path)")
         }
         return URL(fileURLWithPath: expanded, isDirectory: true)
     }
@@ -367,10 +367,10 @@ final class CustomCommandExecutor {
         var isDirectory: ObjCBool = false
         guard expanded.hasPrefix("/"), !expanded.contains("\0"),
               FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory), !isDirectory.boolValue else {
-            throw CustomCommandExecutionError.invalid("找不到程序或脚本：\(path)。请填写可执行文件的绝对路径。")
+            throw CustomCommandExecutionError.invalid("找不到程序或脚本：\(path)")
         }
         guard FileManager.default.isExecutableFile(atPath: expanded) else {
-            throw CustomCommandExecutionError.invalid("程序或脚本没有执行权限：\(path)。请先为该文件设置执行权限。")
+            throw CustomCommandExecutionError.invalid("程序缺少执行权限：\(path)")
         }
         return URL(fileURLWithPath: expanded)
     }
@@ -393,7 +393,7 @@ final class CustomCommandExecutor {
         do {
             try process.run()
         } catch {
-            throw CustomCommandExecutionError.invalid("无法启动程序 \(executable.path)：\(error.localizedDescription) 请检查文件格式、执行权限和工作目录访问权限。")
+            throw CustomCommandExecutionError.invalid("无法启动程序：\(error.localizedDescription)")
         }
         cancellation.attach(process)
         try? pipe.fileHandleForWriting.close()
@@ -414,8 +414,8 @@ final class CustomCommandExecutor {
         let status = process.terminationStatus
         let output = String(decoding: captured, as: UTF8.self) + (truncated ? "\n[输出已截断，仅保留前 \(outputLimit) 字节]" : "")
         let summary = process.terminationReason == .uncaughtSignal
-            ? "程序被信号终止：\(status)。"
-            : "程序已退出，退出码：\(status)。"
+            ? "已终止（信号 \(status)）"
+            : "已退出（退出码 \(status)）"
         return CustomCommandExecutionResult(summary: summary, output: output, exitCode: status)
     }
 }

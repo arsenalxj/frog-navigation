@@ -93,6 +93,38 @@ extension LauncherModel {
         }
     }
 
+    func copyCalcExpression() {
+        let text: String?
+        if calcHistoryFocused, let index = calcHistoryIndex, calcHistory.indices.contains(index) {
+            text = calcHistory[index].expression
+        } else {
+            let trimmed = calcExpression.trimmingCharacters(in: .whitespacesAndNewlines)
+            text = trimmed.isEmpty ? nil : trimmed
+        }
+        guard let text else {
+            setCalcFeedback("✗ 没有可复制的算式", .error)
+            return
+        }
+        NSPasteboard.general.clearContents()
+        if NSPasteboard.general.setString(text, forType: .string) {
+            setCalcFeedback("✓ 已复制算式", .success)
+        } else {
+            setCalcFeedback("✗ 复制失败", .error)
+        }
+    }
+
+    func deleteCalcHistorySelection() {
+        guard calcHistoryFocused, let index = calcHistoryIndex, calcHistory.indices.contains(index) else { return }
+        calcHistory.remove(at: index)
+        if calcHistory.isEmpty {
+            calcHistoryIndex = nil
+            focusCalcInput()
+        } else {
+            selectCalcEntry(at: min(index, calcHistory.count - 1))
+        }
+        setCalcFeedback("✓ 已删除记录", .success)
+    }
+
     func clearCalc() {
         calcExpression = ""
         calcHistory = []
@@ -126,6 +158,13 @@ extension LauncherModel {
     /// 键盘事件在输入框之前拦截；只消费计算器自己的按键，其余字符交给字段编辑器。
     func handleCalcKey(_ event: NSEvent, characters: String) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers == .command, event.keyCode == 51 {
+            if !calcExpression.isEmpty || !calcHistory.isEmpty {
+                clearCalc()
+                setCalcFeedback("✓ 已清空", .success)
+            }
+            return true
+        }
         if event.keyCode == 48, modifiers.isEmpty || modifiers == .shift {
             if calcHistoryFocused { focusCalcInput() }
             else if !calcHistory.isEmpty { selectCalcEntry(at: calcHistoryIndex ?? 0) }
@@ -133,6 +172,10 @@ extension LauncherModel {
         }
         if characters == ":", modifiers.isEmpty || modifiers == .shift { startCommand(); return true }
         if calcHistoryFocused {
+            if modifiers == .shift, event.charactersIgnoringModifiers == "D" {
+                deleteCalcHistorySelection()
+                return true
+            }
             guard modifiers.isEmpty else { return false }
             switch event.keyCode {
             case 36, 76: loadCalcHistorySelection()
